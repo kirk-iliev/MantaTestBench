@@ -1,0 +1,14 @@
+# Manta Test Bench — Python dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# NOTE: vmbpy is NOT on PyPI. It ships with the Allied Vision Vimba X SDK.
+# Install the SDK, then pip-install the bundled wheel, e.g.:
+#   pip install /opt/VimbaX_2023-4/api/python/vmbpy-*.whl
+# (path varies by SDK version / OS). The SDK also provides the GenICam
+# transport layer the camera needs, so it must be installed regardless.
+
+numpy
+opencv-python
+PyQt6
+caproto          # pure-Python EPICS Channel Access client (per-shot PV metadata)

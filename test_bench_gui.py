@@ -18,6 +18,8 @@ import numpy as np
 import cv2
 import vmbpy
 
+from pv_monitor import PVMonitor, load_pv_config
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGroupBox, QFormLayout, QDoubleSpinBox, QPushButton,
@@ -49,9 +51,10 @@ class CameraWorker(QThread):
     initialized    = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, vmb: vmbpy.VmbSystem):
+    def __init__(self, vmb: vmbpy.VmbSystem, pv_monitor=None):
         super().__init__()
         self._vmb        = vmb
+        self._pv_monitor = pv_monitor   # optional EPICS metadata source; may be None
         self._stop_event = threading.Event()
         self._cmd_queue  = queue.Queue()
         self._lock       = threading.Lock()
@@ -69,6 +72,16 @@ class CameraWorker(QThread):
         self._emit_frames = threading.Event()
         self._emit_frames.set()   # streaming on by default
         self._snap_pending = threading.Event()
+
+        # auto-save (armed for the duration of a run)
+        self._armed        = threading.Event()
+        self._save_queue   = queue.Queue()   # (np.ndarray, meta dict) → saver thread
+        self._saver        = None
+        self._run_dir      = None
+        self._shot_index   = 0
+        self._saved_count  = 0
+        self._save_meta    = {}              # exposure/gain/desc snapshot at arm time
+        self._pixel_format = "unknown"
 
     # ── public API (called from GUI thread) ───────────────────────────────
 
@@ -88,6 +101,17 @@ class CameraWorker(QThread):
         """Emit exactly one frame then auto-pause."""
         self._snap_pending.set()
         self._emit_frames.set()
+
+    def arm(self, run_dir: str, meta: dict):
+        """Begin auto-saving every triggered frame into run_dir."""
+        self._run_dir     = run_dir
+        self._save_meta   = meta
+        self._shot_index  = 0
+        self._saved_count = 0
+        self._armed.set()           # set last: gate fields are ready before callback sees it
+
+    def disarm(self):
+        self._armed.clear()
 
     def stop(self):
         self._stop_event.set()
@@ -111,6 +135,11 @@ class CameraWorker(QThread):
                 self._fps_last_time = time.time()
                 last_stat_time = time.time()
 
+                # writer runs on its own thread so disk I/O never stalls
+                # acquisition or the GUI, even at the fastest shot rates
+                self._saver = threading.Thread(target=self._saver_loop, daemon=True)
+                self._saver.start()
+
                 cam.start_streaming(self._frame_handler)
                 try:
                     while not self._stop_event.is_set():
@@ -124,6 +153,8 @@ class CameraWorker(QThread):
                         self._stop_event.wait(timeout=0.05)
                 finally:
                     cam.stop_streaming()
+                    self._save_queue.put(None)          # sentinel → drain & exit saver
+                    self._saver.join(timeout=5.0)
 
         except Exception as exc:
             self.error_occurred.emit(str(exc))
@@ -136,6 +167,18 @@ class CameraWorker(QThread):
         cam.TriggerSource.set("Line1")
         cam.TriggerActivation.set("RisingEdge")
         cam.AcquisitionMode.set("Continuous")
+
+        # 12-bit for quantitative OTR profiles (full 0–4095 dynamic range);
+        # comes back as uint16 and is saved as a 16-bit TIFF. Fall back
+        # silently to whatever the camera defaults to if Mono12 is rejected.
+        try:
+            cam.set_pixel_format(vmbpy.PixelFormat.Mono12)
+        except Exception as exc:
+            self.error_occurred.emit(f"Could not set Mono12 (using default): {exc}")
+        try:
+            self._pixel_format = str(cam.get_pixel_format())
+        except Exception:
+            self._pixel_format = "unknown"
 
     def _read_initial_settings(self, cam) -> dict:
         init = {}
@@ -175,19 +218,49 @@ class CameraWorker(QThread):
                 "max_fps":    max_fps,
                 "total":      self._total_frames,
                 "dropped":    self._dropped_frames,
+                "saved":      self._saved_count,
             }
         self.stats_updated.emit(stats)
 
     def _frame_handler(self, cam, stream, frame):
         """Called by vmbpy on its internal callback thread."""
         if frame.get_status() == vmbpy.FrameStatus.Complete:
+            arr = frame.as_numpy_ndarray().copy()
+
+            with self._lock:
+                self._total_frames += 1
+
+            # Auto-save runs independently of the display gate: every
+            # triggered frame is written while armed, even if the live
+            # view is paused. The frame id / camera timestamp are read
+            # here (before the buffer is requeued) so a missed egun shot
+            # shows up as a gap in the saved sequence.
+            if self._armed.is_set():
+                self._shot_index += 1
+                stamp = datetime.now()
+                # Snapshot EPICS PVs as close to the trigger as possible. This is
+                # just a locked dict copy from the monitor's cache — no network in
+                # the hot path — and is {} when no monitor / no PVs are connected.
+                epics = self._pv_monitor.snapshot() if self._pv_monitor else {}
+                meta = {
+                    "run_dir":      self._run_dir,
+                    "shot_index":   self._shot_index,
+                    "iso":          stamp.isoformat(),
+                    "stem_time":    stamp.strftime("%Y%m%d_%H%M%S_")
+                                    + f"{stamp.microsecond // 1000:03d}",
+                    "frame_id":     frame.get_id(),
+                    "cam_timestamp": frame.get_timestamp(),
+                    "pixel_format": self._pixel_format,
+                    "epics":        epics,
+                    **self._save_meta,   # exposure_us, gain_db, description
+                }
+                self._save_queue.put((arr, meta))
+
             if self._emit_frames.is_set():
-                arr = frame.as_numpy_ndarray().copy()
                 self.frame_ready.emit(arr)
 
                 with self._lock:
-                    self._fps_count    += 1
-                    self._total_frames += 1
+                    self._fps_count += 1
                     now     = time.time()
                     elapsed = now - self._fps_last_time
                     if elapsed >= 1.0:
@@ -204,6 +277,53 @@ class CameraWorker(QThread):
                 self._dropped_frames += 1
 
         cam.queue_frame(frame)
+
+    # ── saver thread ──────────────────────────────────────────────────────
+
+    def _saver_loop(self):
+        """Drain the save queue, writing each frame + sidecar to disk."""
+        while True:
+            item = self._save_queue.get()
+            if item is None:          # sentinel from stop()
+                break
+            arr, meta = item
+            try:
+                self._write_shot(arr, meta)
+                with self._lock:
+                    self._saved_count += 1
+            except Exception as exc:
+                self.error_occurred.emit(f"Save failed (shot {meta['shot_index']}): {exc}")
+
+    def _write_shot(self, arr, meta):
+        stem     = f"shot_{meta['shot_index']:05d}_{meta['stem_time']}"
+        img_path = Path(meta["run_dir"]) / f"{stem}.tiff"
+        txt_path = Path(meta["run_dir"]) / f"{stem}.txt"
+
+        cv2.imwrite(str(img_path), arr)   # uint16 → 16-bit TIFF
+
+        lines = [
+            f"timestamp:     {meta['iso']}",
+            f"shot_index:    {meta['shot_index']}",
+            f"frame_id:      {meta['frame_id']}",
+            f"cam_timestamp: {meta['cam_timestamp']}",
+            f"exposure_us:   {meta.get('exposure_us', 0.0):.1f}",
+            f"gain_db:       {meta.get('gain_db', 0.0):.1f}",
+            f"pixel_format:  {meta['pixel_format']}",
+            f"description:   {meta.get('description', '')}",
+        ]
+
+        # EPICS readbacks captured at trigger time, each with its IOC-set
+        # timestamp so a value's staleness relative to the shot is visible.
+        epics = meta.get("epics", {})
+        for label, rec in epics.items():
+            if rec.get("connected"):
+                ts = rec.get("timestamp")
+                ts_str = datetime.fromtimestamp(ts).isoformat() if ts else "no-timestamp"
+                lines.append(f"epics.{label}: {rec['value']} @ {ts_str}")
+            else:
+                lines.append(f"epics.{label}: disconnected")
+
+        txt_path.write_text("\n".join(lines) + "\n")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -225,8 +345,29 @@ class MainWindow(QMainWindow):
         self._vmb = vmbpy.VmbSystem.get_instance()
         self._vmb.__enter__()
 
+        self._pv_monitor = self._init_pv_monitor()
+
         self._build_ui()
         self._start_camera()
+
+    def _init_pv_monitor(self):
+        """Start the optional EPICS PV monitor from pv_config.json.
+
+        Returns a started PVMonitor, or None if there's nothing to monitor or
+        anything goes wrong. The camera tool runs identically either way.
+        """
+        cfg_path = Path(__file__).parent / "pv_config.json"
+        try:
+            pv_map = load_pv_config(cfg_path)
+            if not pv_map:
+                return None
+            mon = PVMonitor(pv_map)
+            mon.start()
+            print(f"EPICS metadata: monitoring {mon.total_count()} PV(s) from {cfg_path.name}")
+            return mon
+        except Exception as exc:
+            print(f"EPICS metadata disabled (monitor init failed: {exc})")
+            return None
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -273,12 +414,14 @@ class MainWindow(QMainWindow):
         self._lbl_max_fps  = QLabel("—")
         self._lbl_total    = QLabel("0")
         self._lbl_dropped  = QLabel("0")
+        self._lbl_saved    = QLabel("0")
 
         form.addRow("System FPS:",   self._lbl_sys_fps)
         form.addRow("Camera FPS:",   self._lbl_cam_fps)
         form.addRow("Max Possible:", self._lbl_max_fps)
         form.addRow("Total Frames:", self._lbl_total)
         form.addRow("Dropped:",      self._lbl_dropped)
+        form.addRow("Shots Saved:",  self._lbl_saved)
         return group
 
     def _build_camera_settings_group(self) -> QGroupBox:
@@ -369,7 +512,14 @@ class MainWindow(QMainWindow):
         self._desc_edit.setPlaceholderText("Notes about this measurement…")
         layout.addWidget(self._desc_edit)
 
-        # Save button
+        # Arm/Record: while armed, every triggered frame auto-saves into a
+        # fresh run_<timestamp> subfolder. This is the emittance-scan path.
+        self._arm_btn = QPushButton("Arm Auto-Save")
+        self._arm_btn.setCheckable(True)
+        self._arm_btn.clicked.connect(self._toggle_arm)
+        layout.addWidget(self._arm_btn)
+
+        # Manual single-shot save (one-offs / alignment checks)
         save_btn = QPushButton("Save Frame + Metadata")
         save_btn.clicked.connect(self._save_frame)
         layout.addWidget(save_btn)
@@ -385,7 +535,7 @@ class MainWindow(QMainWindow):
     # ── Camera startup ────────────────────────────────────────────────────
 
     def _start_camera(self):
-        self._worker = CameraWorker(self._vmb)
+        self._worker = CameraWorker(self._vmb, self._pv_monitor)
         self._worker.frame_ready.connect(self._on_frame_ready)
         self._worker.stats_updated.connect(self._on_stats_updated)
         self._worker.initialized.connect(self._on_camera_initialized)
@@ -440,6 +590,7 @@ class MainWindow(QMainWindow):
         self._lbl_dropped.setText(str(dropped))
         color = "color: #e55;" if dropped > 0 else ""
         self._lbl_dropped.setStyleSheet(color)
+        self._lbl_saved.setText(str(stats['saved']))
 
     def _on_error(self, msg: str):
         self.statusBar().showMessage(f"Error: {msg}")
@@ -501,6 +652,37 @@ class MainWindow(QMainWindow):
             self._save_dir = path
             self._dir_label.setText(path)
 
+    def _toggle_arm(self):
+        if self._arm_btn.isChecked():
+            # Start a run: every triggered frame from now on is saved.
+            run_dir = Path(self._save_dir) / ("run_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+            try:
+                run_dir.mkdir(parents=True, exist_ok=False)
+            except Exception as exc:
+                self._arm_btn.setChecked(False)
+                self._save_status.setStyleSheet("color: #e77; font-size: 10px;")
+                self._save_status.setText(f"Could not create run folder:\n{exc}")
+                return
+
+            meta = {
+                "exposure_us": self._exp_spin.value(),
+                "gain_db":     self._gain_spin.value(),
+                "description": self._desc_edit.toPlainText().strip(),
+            }
+            self._worker.arm(str(run_dir), meta)
+
+            self._arm_btn.setText("Disarm (Recording…)")
+            self._arm_btn.setStyleSheet("color: #e55; font-weight: bold;")
+            self._save_status.setStyleSheet("color: #4a9; font-size: 10px;")
+            self._save_status.setText(f"Armed — saving to:\n{run_dir.name}")
+            self.statusBar().showMessage(f"Recording every trigger → {run_dir}")
+        else:
+            self._worker.disarm()
+            self._arm_btn.setText("Arm Auto-Save")
+            self._arm_btn.setStyleSheet("")
+            self._save_status.setText("Disarmed.")
+            self.statusBar().showMessage("Auto-save disarmed.")
+
     def _save_frame(self):
         if self._current_frame is None:
             self._save_status.setStyleSheet("color: #e77; font-size: 10px;")
@@ -532,6 +714,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._worker.stop()
         self._worker.wait(3000)
+        if self._pv_monitor is not None:
+            self._pv_monitor.stop()
         self._vmb.__exit__(None, None, None)
         event.accept()
 

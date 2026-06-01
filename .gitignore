@@ -2,3 +2,6 @@
 PROJECT_OVERVIEW.md
 test_discovery.py
 hw_trigger_test.py
+
+# Personal/live PV config — commit pv_config.example.json instead
+pv_config.json
