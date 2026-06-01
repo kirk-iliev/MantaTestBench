@@ -358,12 +358,15 @@ class MainWindow(QMainWindow):
         """
         cfg_path = Path(__file__).parent / "pv_config.json"
         try:
-            pv_map = load_pv_config(cfg_path)
+            pv_map, tunnel_cfg = load_pv_config(cfg_path)
             if not pv_map:
                 return None
-            mon = PVMonitor(pv_map)
+            mon = PVMonitor(pv_map, tunnel_cfg=tunnel_cfg)
             mon.start()
-            print(f"EPICS metadata: monitoring {mon.total_count()} PV(s) from {cfg_path.name}")
+            mode = (f"tunnel {tunnel_cfg['host']}:{tunnel_cfg['port']}"
+                    if tunnel_cfg else "native")
+            print(f"EPICS metadata: monitoring {mon.total_count()} PV(s) "
+                  f"from {cfg_path.name} ({mode} mode)")
             return mon
         except Exception as exc:
             print(f"EPICS metadata disabled (monitor init failed: {exc})")

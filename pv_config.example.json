@@ -1,4 +1,6 @@
 {
+  "_epics":          {"host": "", "port": 15064},
+
   "gun_phase_deg":   "EGUN:PHASE:RBV",
   "gun_voltage_kv":  "EGUN:HV:VOLTAGE:RBV",
   "q1_current_a":    "GTL:Q1:CURRENT:RBV",
