@@ -139,7 +139,7 @@ class CameraWorker(QThread):
 
     def _read_initial_settings(self, cam) -> dict:
         init = {}
-        for feat, key in [("ExposureTime", "exposure_us"), ("Gain", "gain_db")]:
+        for feat, key in [("ExposureTimeAbs", "exposure_us"), ("Gain", "gain_db")]:
             try:
                 init[key] = cam.get_feature_by_name(feat).get()
             except Exception:
@@ -490,7 +490,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Snap — waiting for next frame…")
 
     def _apply_exposure(self):
-        self._worker.set_feature("ExposureTime", self._exp_spin.value())
+        self._worker.set_feature("ExposureTimeAbs", self._exp_spin.value())
 
     def _apply_gain(self):
         self._worker.set_feature("Gain", self._gain_spin.value())
