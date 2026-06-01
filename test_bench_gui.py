@@ -221,6 +221,8 @@ class MainWindow(QMainWindow):
         self._save_dir = str(Path.home() / "Desktop")
         self._hw_trigger_active = True   # starts in hardware trigger mode
         self._auto_stretch = False
+        self._armed = False              # auto-save every triggered frame
+        self._shot_index = 0             # per-arm-session save counter
 
         self._vmb = vmbpy.VmbSystem.get_instance()
         self._vmb.__enter__()
@@ -333,6 +335,11 @@ class MainWindow(QMainWindow):
         acq_row.addWidget(self._stream_btn)
         acq_row.addWidget(self._snap_btn)
 
+        # Arm: auto-save every Line1-triggered frame until disarmed
+        self._arm_btn = QPushButton("Arm")
+        self._arm_btn.setCheckable(True)
+        self._arm_btn.clicked.connect(self._toggle_arm)
+
         stretch_chk = QCheckBox("Auto-stretch display")
         stretch_chk.setChecked(False)
         stretch_chk.stateChanged.connect(
@@ -343,6 +350,7 @@ class MainWindow(QMainWindow):
         form.addRow("Gain:",     gain_row)
         form.addRow(self._trigger_btn)
         form.addRow(acq_row)
+        form.addRow(self._arm_btn)
         form.addRow(stretch_chk)
         return group
 
@@ -431,6 +439,16 @@ class MainWindow(QMainWindow):
 
         self._view_label.setPixmap(QPixmap.fromImage(qimg))
 
+        # Armed: every triggered frame is saved with its current metadata.
+        if self._armed:
+            try:
+                self._shot_index += 1
+                stem = self._write_frame(self._current_frame, shot_index=self._shot_index)
+                self.statusBar().showMessage(f"Armed — saved shot {self._shot_index}: {stem}")
+            except Exception as exc:
+                self._disarm()
+                self.statusBar().showMessage(f"Auto-save failed, disarmed: {exc}")
+
     def _on_stats_updated(self, stats: dict):
         self._lbl_sys_fps.setText(f"{stats['system_fps']:.2f}")
         self._lbl_cam_fps.setText(f"{stats['camera_fps']:.2f}")
@@ -489,6 +507,52 @@ class MainWindow(QMainWindow):
         self._stream_btn.setChecked(True)
         self.statusBar().showMessage("Snap — waiting for next frame…")
 
+    def _toggle_arm(self):
+        if self._armed:
+            self._disarm()
+        else:
+            self._arm()
+
+    def _arm(self):
+        # Arming always runs in hardware-trigger mode. If we were in free-run,
+        # restore the Line1 rising-edge trigger before arming.
+        if not self._hw_trigger_active:
+            self._hw_trigger_active = True
+            self._worker.set_feature("TriggerSelector",   "FrameStart")
+            self._worker.set_feature("TriggerSource",     "Line1")
+            self._worker.set_feature("TriggerActivation", "RisingEdge")
+            self._worker.set_feature("TriggerMode",       "On")
+            self._trigger_btn.setText("Mode: Hardware Trigger (Line1)")
+            self._trigger_btn.setChecked(False)
+        self._worker.resume_stream()   # ensure triggered frames are emitted
+
+        self._armed = True
+        self._shot_index = 0
+
+        # Lock mode controls so we can't switch to free-run and flood-save.
+        self._trigger_btn.setEnabled(False)
+        self._stream_btn.setEnabled(False)
+        self._snap_btn.setEnabled(False)
+
+        self._arm_btn.setText("Disarm")
+        self._arm_btn.setChecked(True)
+        self._view_label.setText("Armed — waiting for Line1 rising edge…")
+        self.statusBar().showMessage("Armed — waiting for Line1 rising edge…")
+
+    def _disarm(self):
+        self._armed = False
+
+        # Restore control availability. Stream/Snap are free-run-only, and
+        # arming forces hardware-trigger mode, so they stay disabled here.
+        self._trigger_btn.setEnabled(True)
+        free_run = not self._hw_trigger_active
+        self._stream_btn.setEnabled(free_run)
+        self._snap_btn.setEnabled(free_run)
+
+        self._arm_btn.setText("Arm")
+        self._arm_btn.setChecked(False)
+        self.statusBar().showMessage(f"Disarmed — {self._shot_index} frame(s) saved.")
+
     def _apply_exposure(self):
         self._worker.set_feature("ExposureTime", self._exp_spin.value())
 
@@ -507,14 +571,27 @@ class MainWindow(QMainWindow):
             self._save_status.setText("No frame captured yet.")
             return
 
+        stem = self._write_frame(self._current_frame)
+        self._save_status.setStyleSheet("color: #4a9; font-size: 10px;")
+        self._save_status.setText(f"Saved:\n{stem}")
+
+    def _write_frame(self, frame: np.ndarray, shot_index: int | None = None) -> str:
+        """Write a frame + sidecar metadata to the save dir; return the stem.
+
+        Shared by the manual Save button and armed auto-save. When shot_index
+        is given, it is appended to the filename and recorded in the sidecar so
+        frames stay ordered even if two triggers land in the same millisecond.
+        """
         now  = datetime.now()
         # millisecond precision avoids collisions at test-bench rates
         stem = "frame_" + now.strftime("%Y%m%d_%H%M%S_") + f"{now.microsecond // 1000:03d}"
+        if shot_index is not None:
+            stem += f"_{shot_index:04d}"
 
         img_path = Path(self._save_dir) / f"{stem}.tiff"
         txt_path = Path(self._save_dir) / f"{stem}.txt"
 
-        cv2.imwrite(str(img_path), self._current_frame)
+        cv2.imwrite(str(img_path), frame)
 
         lines = [
             f"timestamp:   {now.isoformat()}",
@@ -522,10 +599,10 @@ class MainWindow(QMainWindow):
             f"exposure_us: {self._exp_spin.value():.1f}",
             f"gain_db:     {self._gain_spin.value():.1f}",
         ]
+        if shot_index is not None:
+            lines.append(f"shot_index:  {shot_index}")
         txt_path.write_text("\n".join(lines) + "\n")
-
-        self._save_status.setStyleSheet("color: #4a9; font-size: 10px;")
-        self._save_status.setText(f"Saved:\n{stem}")
+        return stem
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 
