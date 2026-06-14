@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QGroupBox, QFormLayout, QDoubleSpinBox, QPushButton,
     QPlainTextEdit, QFileDialog, QSizePolicy, QCheckBox,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QEvent
 from PyQt6.QtGui import QImage, QPixmap
 
 
@@ -221,7 +221,14 @@ class MainWindow(QMainWindow):
         self._save_dir = str(Path.home() / "Desktop")
         self._hw_trigger_active = True   # starts in hardware trigger mode
         self._auto_stretch = False
+        self._jet_colormap = False       # false-color display only (raw save unchanged)
+        self._pixel_probe = False        # hover overlay showing raw pixel intensity
         self._armed = False              # auto-save every triggered frame
+
+        # geometry of the last displayed pixmap, for cursor→pixel mapping
+        self._disp_scale = 0.0
+        self._disp_w = 0
+        self._disp_h = 0
         self._shot_index = 0             # per-arm-session save counter
 
         self._vmb = vmbpy.VmbSystem.get_instance()
@@ -251,6 +258,22 @@ class MainWindow(QMainWindow):
         lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         lbl.setStyleSheet("background: #1a1a1a; color: #666; font-size: 14px;")
         self._view_label = lbl
+
+        # Hover probe: track mouse without a pressed button, and route the
+        # label's mouse events through MainWindow.eventFilter.
+        lbl.setMouseTracking(True)
+        lbl.installEventFilter(self)
+
+        # Floating popup, drawn as a child of the view so it sits over the image.
+        probe = QLabel(lbl)
+        probe.setVisible(False)
+        probe.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        probe.setStyleSheet(
+            "background: rgba(0,0,0,200); color: #fc0; font-size: 11px;"
+            "font-family: monospace; padding: 3px 5px; border: 1px solid #555;"
+        )
+        self._probe_label = probe
+
         return lbl
 
     def _build_right_panel(self) -> QWidget:
@@ -346,12 +369,24 @@ class MainWindow(QMainWindow):
             lambda state: setattr(self, '_auto_stretch', bool(state))
         )
 
+        jet_chk = QCheckBox("Jet colormap")
+        jet_chk.setChecked(False)
+        jet_chk.stateChanged.connect(
+            lambda state: setattr(self, '_jet_colormap', bool(state))
+        )
+
+        probe_chk = QCheckBox("Pixel intensity probe")
+        probe_chk.setChecked(False)
+        probe_chk.stateChanged.connect(self._toggle_pixel_probe)
+
         form.addRow("Exposure:", exp_row)
         form.addRow("Gain:",     gain_row)
         form.addRow(self._trigger_btn)
         form.addRow(acq_row)
         form.addRow(self._arm_btn)
         form.addRow(stretch_chk)
+        form.addRow(jet_chk)
+        form.addRow(probe_chk)
         return group
 
     def _build_save_group(self) -> QGroupBox:
@@ -419,6 +454,9 @@ class MainWindow(QMainWindow):
         dh     = max(1, int(h * scale))
         disp   = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_AREA)
 
+        # remember display geometry so the hover probe can map cursor→pixel
+        self._disp_scale, self._disp_w, self._disp_h = scale, dw, dh
+
         # Convert to uint8 for display regardless of camera bit depth.
         # Mono12 / Mono12Packed come back as uint16; shift right 4 bits
         # (12-bit range 0–4095 → 8-bit range 0–255) before handing to QImage,
@@ -430,6 +468,12 @@ class MainWindow(QMainWindow):
         # little of the dynamic range the signal actually uses.
         if self._auto_stretch:
             cv2.normalize(disp, disp, 0, 255, cv2.NORM_MINMAX)
+
+        # Optional false-color: map 8-bit grayscale intensity through Jet.
+        # Display-only — the raw frame in self._current_frame is untouched.
+        # applyColorMap returns a 3-channel BGR image, handled by the path below.
+        if self._jet_colormap and disp.ndim == 2:
+            disp = cv2.applyColorMap(disp, cv2.COLORMAP_JET)
 
         if disp.ndim == 2:
             qimg = QImage(disp.tobytes(), dw, dh, dw, QImage.Format.Format_Grayscale8)
@@ -461,6 +505,70 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str):
         self.statusBar().showMessage(f"Error: {msg}")
+
+    # ── Pixel intensity probe ─────────────────────────────────────────────
+
+    def _toggle_pixel_probe(self, state):
+        self._pixel_probe = bool(state)
+        if not self._pixel_probe:
+            self._probe_label.hide()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "_view_label", None) and hasattr(self, "_probe_label"):
+            etype = event.type()
+            if etype == QEvent.Type.MouseMove and self._pixel_probe:
+                self._update_probe(event.position().toPoint())
+            elif etype == QEvent.Type.Leave:
+                self._probe_label.hide()
+        return super().eventFilter(obj, event)
+
+    def _update_probe(self, pos):
+        """Show raw intensity for the frame pixel under the cursor."""
+        frame = self._current_frame
+        if frame is None or self._disp_scale <= 0:
+            self._probe_label.hide()
+            return
+
+        # The pixmap is centered in the label; back out the centering offset.
+        lw, lh = self._view_label.width(), self._view_label.height()
+        dx = pos.x() - (lw - self._disp_w) / 2
+        dy = pos.y() - (lh - self._disp_h) / 2
+        if not (0 <= dx < self._disp_w and 0 <= dy < self._disp_h):
+            self._probe_label.hide()
+            return
+
+        h, w = frame.shape[:2]
+        fx = min(int(dx / self._disp_scale), w - 1)
+        fy = min(int(dy / self._disp_scale), h - 1)
+        val = frame[fy, fx]
+
+        # Saturation is gauged against full scale for the raw bit depth.
+        # Mono12 frames arrive as uint16 holding 0–4095, not 0–65535.
+        full = 4095 if frame.dtype == np.uint16 else 255
+        peak = int(np.max(val))               # max channel if color, else the value
+        pct  = 100.0 * peak / full
+
+        if frame.ndim == 2:
+            text = f"({fx},{fy})  {peak}/{full}  {pct:.0f}%"
+        else:
+            text = f"({fx},{fy})  {tuple(int(c) for c in val)}  {pct:.0f}%"
+        self._probe_label.setText(text)
+
+        # Flag saturation in red once within ~1% of full scale.
+        saturated = peak >= full * 0.99
+        bg = "rgba(160,0,0,220)" if saturated else "rgba(0,0,0,200)"
+        fg = "#fff" if saturated else "#fc0"
+        self._probe_label.setStyleSheet(
+            f"background: {bg}; color: {fg}; font-size: 11px;"
+            "font-family: monospace; padding: 3px 5px; border: 1px solid #555;"
+        )
+        self._probe_label.adjustSize()
+
+        # Offset the popup from the cursor, clamped to stay inside the view.
+        px = min(pos.x() + 14, lw - self._probe_label.width())
+        py = min(pos.y() + 14, lh - self._probe_label.height())
+        self._probe_label.move(max(0, px), max(0, py))
+        self._probe_label.show()
 
     def _toggle_trigger_mode(self):
         self._hw_trigger_active = not self._hw_trigger_active
