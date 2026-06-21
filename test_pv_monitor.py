@@ -28,11 +28,11 @@ def test_config_parsing():
         assert pv_map == {"a": "PV:A", "b": "PV:B"}, pv_map
         assert tun is None
 
-        # _epics with host -> tunnel; _-keys excluded from pv_map
+        # _epics with host -> tunnel (one-element forwards list); _-keys excluded
         p = _write(tmp, {"_epics": {"host": "localhost", "port": 15064}, "a": "PV:A"})
         pv_map, tun = load_pv_config(p)
         assert pv_map == {"a": "PV:A"}, pv_map
-        assert tun == {"host": "localhost", "port": 15064}, tun
+        assert tun == [{"host": "localhost", "port": 15064}], tun
 
         # empty host -> native (so the example config is safe to copy)
         p = _write(tmp, {"_epics": {"host": "", "port": 15064}, "a": "PV:A"})
@@ -42,13 +42,40 @@ def test_config_parsing():
         # default port when omitted
         p = _write(tmp, {"_epics": {"host": "gw"}, "a": "PV:A"})
         _, tun = load_pv_config(p)
-        assert tun == {"host": "gw", "port": 5064}, tun
+        assert tun == [{"host": "gw", "port": 5064}], tun
 
         # list form -> names double as labels, native
         p = _write(tmp, ["PV:X", "PV:Y"])
         pv_map, tun = load_pv_config(p)
         assert pv_map == {"PV:X": "PV:X", "PV:Y": "PV:Y"}, pv_map
         assert tun is None
+
+        # forwards list -> multi-forward tunnel, in order
+        p = _write(tmp, {"_epics": {"forwards": [
+            {"host": "localhost", "port": 15064},
+            {"host": "localhost", "port": 15065}]}, "a": "PV:A"})
+        pv_map, tun = load_pv_config(p)
+        assert pv_map == {"a": "PV:A"}, pv_map
+        assert tun == [{"host": "localhost", "port": 15064},
+                       {"host": "localhost", "port": 15065}], tun
+
+        # forwards: missing host -> localhost; bad port -> 5064; non-dict skipped
+        p = _write(tmp, {"_epics": {"forwards": [
+            {"port": 16000}, {"host": "h", "port": "x"}, "junk"]}})
+        _, tun = load_pv_config(p)
+        assert tun == [{"host": "localhost", "port": 16000},
+                       {"host": "h", "port": 5064}], tun
+
+        # empty forwards list -> native
+        p = _write(tmp, {"_epics": {"forwards": []}, "a": "PV:A"})
+        _, tun = load_pv_config(p)
+        assert tun is None, tun
+
+        # forwards wins over host when both present
+        p = _write(tmp, {"_epics": {"host": "ignored",
+                                    "forwards": [{"host": "localhost", "port": 1}]}})
+        _, tun = load_pv_config(p)
+        assert tun == [{"host": "localhost", "port": 1}], tun
 
         # missing / empty / bad json
         assert load_pv_config(Path(tmp) / "nope.json") == ({}, None)

@@ -97,21 +97,45 @@ def load_pv_config(path):
 
 
 def _parse_tunnel_cfg(block):
-    """Validate an ``_epics`` block into ``{"host","port"}`` or ``None``.
+    """Validate an ``_epics`` block into a list of forwards, or ``None``.
 
-    Returns ``None`` (native mode) unless ``block`` is a dict with a non-empty
-    string ``host``. ``port`` defaults to the EPICS CA port 5064.
+    Returns ``None`` (native mode) unless tunnel mode is requested. Tunnel mode
+    is requested by either of, with ``forwards`` taking precedence:
+
+      * ``forwards``: a non-empty list of ``{"host","port"}`` entries — one per
+        ``ssh -L`` local port. Each ``host`` defaults to ``"localhost"`` and
+        ``port`` to 5064. Non-dict entries are skipped.
+      * ``host``: a non-empty string (the original single-forward form),
+        normalized to a one-element list.
+
+    Any block that yields no valid forward (incl. an empty/empty-host config)
+    returns ``None``, so the example config stays safe to copy.
     """
     if not isinstance(block, dict):
         return None
-    host = block.get("host")
-    if not isinstance(host, str) or not host:
-        return None
-    try:
-        port = int(block.get("port", 5064))
-    except (TypeError, ValueError):
-        port = 5064
-    return {"host": host, "port": port}
+
+    def _one(host, port):
+        if not isinstance(host, str) or not host:
+            return None
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 5064
+        return {"host": host, "port": port}
+
+    raw_forwards = block.get("forwards")
+    if isinstance(raw_forwards, list):
+        out = []
+        for entry in raw_forwards:
+            if not isinstance(entry, dict):
+                continue
+            fwd = _one(entry.get("host", "localhost"), entry.get("port", 5064))
+            if fwd is not None:
+                out.append(fwd)
+        return out or None
+
+    fwd = _one(block.get("host"), block.get("port", 5064))
+    return [fwd] if fwd is not None else None
 
 
 def _to_native(data):
