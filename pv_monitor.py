@@ -13,11 +13,12 @@ optional ``_epics`` block in the config:
   * Native mode (default, on the controls subnet): a caproto threading
     ``Context()`` with standard UDP discovery. This is the original behaviour
     and is byte-for-byte unchanged when no ``_epics.host`` is configured.
-  * Tunnel mode (off-subnet / lab WiFi via ``ssh -L``): a single raw-socket
-    ``caproto.VirtualCircuit`` to a fixed ``host:port``, bypassing the CA
-    search phase entirely. All traffic stays inside one TCP connection — what
-    an SSH ``-L`` forward (ideally to a CA gateway) provides. See
-    ``docs/EPICS_CONNECTIVITY.md``.
+  * Tunnel mode (off-subnet / lab WiFi via ``ssh -L``): one raw-socket
+    ``caproto.VirtualCircuit`` per configured forward, each to a fixed
+    ``host:port``, bypassing the CA search phase entirely. Each PV is opened by
+    name on every forward and auto-claims the one IOC that serves it (others
+    fast-fail). Built for a per-IOC ``ssh -L`` forward (ideally to a CA gateway).
+    See ``docs/EPICS_CONNECTIVITY.md``.
 
 Designed to be entirely optional and failure-tolerant — nothing here can
 raise into the acquisition path, and ``start()`` never blocks the caller:
@@ -247,13 +248,14 @@ class PVMonitor:
 
     Cache entry per label: ``{"value": <py>, "timestamp": <float|None>, "connected": <bool>}``.
 
-    ``tunnel_cfg`` (``{"host","port"}`` or ``None``) selects the backend. When
-    ``None`` (or caproto is unavailable) the original native-mode path runs.
+    ``tunnel_cfg`` selects the backend: ``None`` (native), a single
+    ``{"host","port"}`` dict (back-compat), or a list of such dicts (one per
+    ``ssh -L`` forward). Native mode runs when it is empty or caproto is absent.
     """
 
-    def __init__(self, pv_map: dict, tunnel_cfg: dict = None):
+    def __init__(self, pv_map: dict, tunnel_cfg=None):
         self._pv_map = dict(pv_map)                 # label -> pv name
-        self._tunnel_cfg = tunnel_cfg
+        self._forwards = self._normalize_forwards(tunnel_cfg)
         self._lock   = threading.Lock()
         self._cache  = {
             label: {"value": None, "timestamp": None, "connected": False}
@@ -264,23 +266,37 @@ class PVMonitor:
         self._subs = []
         # tunnel-mode state
         self._stop_event = threading.Event()
-        self._tunnel_thread = None
-        self._tunnel_sock = None
+        self._tunnel_threads = []
+        self._tunnel_socks = set()      # live sockets, guarded by _lock
+        self._claimed = set()           # labels owned by a forward, guarded by _lock
+
+    @staticmethod
+    def _normalize_forwards(tunnel_cfg):
+        """Accept None (native), a single ``{host,port}`` dict (back-compat), or
+        a list of such dicts, and return a list of forwards. Empty -> native."""
+        if not tunnel_cfg:
+            return []
+        if isinstance(tunnel_cfg, dict):
+            return [tunnel_cfg]
+        return list(tunnel_cfg)
 
     def start(self):
-        """Open the connection and subscribe (timestamped) to every PV.
+        """Open the connection(s) and subscribe (timestamped) to every PV.
 
         Connection and reconnection happen in the background; an unreachable PV
-        simply never updates its cache entry. Never raises, and never blocks the
-        caller — tunnel mode does zero network I/O here, it only spawns the
-        background loop, so a dead SSH forward can't stall GUI startup.
+        or forward simply never updates its cache entry. Never raises, and never
+        blocks the caller — tunnel mode does zero network I/O here, it only spawns
+        the background loops, so a dead SSH forward can't stall GUI startup.
         """
         if not _CAPROTO_OK or not self._pv_map:
             return
-        if self._tunnel_cfg:
-            self._tunnel_thread = threading.Thread(
-                target=self._run_tunnel_mode, name="pv-tunnel", daemon=True)
-            self._tunnel_thread.start()
+        if self._forwards:
+            for fwd in self._forwards:
+                t = threading.Thread(
+                    target=self._run_one_forward, args=(fwd,),
+                    name=f"pv-tunnel-{fwd['port']}", daemon=True)
+                t.start()
+                self._tunnel_threads.append(t)
         else:
             self._start_native()
 
@@ -318,33 +334,44 @@ class PVMonitor:
 
     # ── tunnel mode ───────────────────────────────────────────────────────
 
-    def _run_tunnel_mode(self):
-        """Background loop: connect a single circuit to host:port, open every PV
-        by name, subscribe, and feed EventAddResponse payloads into the cache.
-        Reconnects with backoff on any failure. Honours the stop event."""
-        host = self._tunnel_cfg["host"]
-        port = self._tunnel_cfg["port"]
+    def _run_one_forward(self, forward):
+        """Background loop for ONE forward: connect a circuit to its host:port,
+        open every not-yet-claimed PV by name (non-owning IOCs fast-fail), claim
+        and subscribe the ones that connect, and feed EventAddResponse payloads
+        into the cache. Reconnects with backoff on any failure. Honours stop."""
+        host = forward["host"]
+        port = forward["port"]
         attempt = 0
 
         while not self._stop_event.is_set():
             sock = None
+            my_labels = []
             try:
                 sock, circuit = _connect_epics_socket(host, port)
-                self._tunnel_sock = sock
+                with self._lock:
+                    self._tunnel_socks.add(sock)
                 attempt = 0
 
-                # Open every channel FIRST. Channel-open drains the socket, and
-                # an EventAddResponse from an already-subscribed PV would be
-                # consumed and lost there — so no subscription may be live while
-                # another channel is still opening. Open-all, then subscribe-all,
-                # then let the main loop below be the sole drainer.
+                # Open all FIRST (channel-open drains the socket; a live
+                # subscription's EventAddResponse would be consumed and lost
+                # there). Skip labels another forward already serves; fast-fail
+                # for PVs this IOC doesn't own.
                 channels = []
                 for label, pv_name in self._pv_map.items():
                     if self._stop_event.is_set():
                         break
+                    with self._lock:
+                        if label in self._claimed:
+                            continue
                     chan = _open_channel_safe(sock, circuit, pv_name, timeout=2.0)
-                    if chan is not None:
-                        channels.append((label, chan))   # else: stays disconnected
+                    if chan is None:
+                        continue
+                    with self._lock:
+                        if label in self._claimed:   # lost a race; owner keeps it
+                            continue
+                        self._claimed.add(label)
+                    channels.append((label, chan))
+                    my_labels.append(label)
 
                 subid_to_label = {}
                 for label, chan in channels:
@@ -372,16 +399,16 @@ class PVMonitor:
             except Exception:
                 pass
             finally:
-                self._tunnel_sock = None
+                with self._lock:
+                    self._tunnel_socks.discard(sock)
+                    for label in my_labels:          # release for re-claim
+                        self._claimed.discard(label)
+                        self._cache[label]["connected"] = False
                 if sock is not None:
                     try:
                         sock.close()
                     except Exception:
                         pass
-                # connection dropped: nothing is live anymore
-                with self._lock:
-                    for label in self._cache:
-                        self._cache[label]["connected"] = False
 
             if self._stop_event.is_set():
                 break
@@ -411,10 +438,11 @@ class PVMonitor:
         thread and give up after a short timeout rather than freeze the app.
         """
         self._stop_event.set()
-        sock = self._tunnel_sock
-        if sock is not None:                # unblock the drain loop's select()
+        with self._lock:                    # unblock every drain loop's select()
+            socks = list(self._tunnel_socks)
+        for s in socks:
             try:
-                sock.close()
+                s.close()
             except Exception:
                 pass
 
@@ -432,9 +460,9 @@ class PVMonitor:
 
         t = threading.Thread(target=_teardown, daemon=True)
         t.start()
-        t.join(timeout=2.0)        # if it's still going, let the daemon thread die with us
-        if self._tunnel_thread is not None:
-            self._tunnel_thread.join(timeout=2.0)
+        t.join(timeout=2.0)        # if still going, let the daemon die with us
+        for tt in self._tunnel_threads:
+            tt.join(timeout=2.0)
         self._subs = []
         self._pvs  = []
         self._ctx  = None

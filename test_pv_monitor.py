@@ -106,6 +106,31 @@ def test_tunnel_start_never_blocks_or_raises():
     print("ok  test_tunnel_start_never_blocks_or_raises")
 
 
+def test_multi_forward_start_never_blocks_or_raises():
+    # Two dead forwards (TEST-NET, port 1): both threads back off forever;
+    # start() must return instantly and stop() must not hang.
+    pv_map = {"a": "PV:A", "b": "PV:B"}
+    mon = PVMonitor(pv_map, tunnel_cfg=[
+        {"host": "192.0.2.1", "port": 1},
+        {"host": "192.0.2.2", "port": 1}])
+
+    t0 = time.monotonic()
+    mon.start()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5, f"start() blocked for {elapsed:.2f}s"
+
+    snap = mon.snapshot()
+    assert set(snap) == {"a", "b"}
+    assert all(not v["connected"] for v in snap.values()), snap
+    assert mon.connected_count() == 0
+    assert mon.total_count() == 2
+
+    t0 = time.monotonic()
+    mon.stop()
+    assert time.monotonic() - t0 < 5.0
+    print("ok  test_multi_forward_start_never_blocks_or_raises")
+
+
 def test_no_pvs_is_noop():
     mon = PVMonitor({}, tunnel_cfg={"host": "192.0.2.1", "port": 1})
     mon.start()
@@ -118,5 +143,6 @@ def test_no_pvs_is_noop():
 if __name__ == "__main__":
     test_config_parsing()
     test_tunnel_start_never_blocks_or_raises()
+    test_multi_forward_start_never_blocks_or_raises()
     test_no_pvs_is_noop()
     print("\nall passed")
