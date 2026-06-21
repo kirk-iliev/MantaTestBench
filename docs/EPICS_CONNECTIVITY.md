@@ -116,15 +116,42 @@ ssh -L 15064:<ioc-host-or-ip>:5064  you@controls-gateway
   be **different IOCs on different ports** → need a forward per IOC, or (better)
   a **CA gateway** on the jump host multiplexing them behind one port.
 
-## Status of pv_monitor.py + what porting would take
+### Multi-forward recipe (implemented)
 
-- Current `pv_monitor.py` is **native-only** — no tunnel path.
-- To support WiFi/off-subnet: add a tunnel mode mirroring PyBeamViewer's
-  `_run_tunnel_mode` (hand-built circuit to `localhost:<forwarded-port>`, open
-  PVs by name, subscribe `DBE_VALUE`, feed `EventAddResponse` payloads into the
-  existing cache).
-- The `snapshot()` / sidecar contract would stay identical — only the connection
-  guts change, so the GUI needs no changes.
+`pv_monitor.py` now supports **one forward per IOC**. Confirmed on-site, the
+PVs span multiple IOC hosts (all on the facility-pinned CA server port 35131):
+
+```bash
+# through the controls jump host appsdev2, one -L per IOC host:
+ssh -L 15064:131.243.89.29:35131 \
+    -L 15065:b04lx-dpsc.als.lbl.gov:35131 \
+    kirkiliev@appsdev2
+```
+
+Then in `pv_config.json`:
+
+```json
+"_epics": {
+  "forwards": [
+    {"host": "localhost", "port": 15064},
+    {"host": "localhost", "port": 15065}
+  ]
+}
+```
+
+Each PV is opened by name on every forward and auto-claims whichever IOC serves
+it; PVs on neither IOC stay `disconnected`. (Port 35131 looks pinned
+facility-wide — confirm it survives an IOC reboot; a dynamically-assigned server
+port would change and break the forward.)
+
+## Status of pv_monitor.py
+
+- Native mode (on-subnet) and tunnel mode (off-subnet) both ship.
+- Tunnel mode takes a **list of forwards** under `_epics.forwards`; the older
+  single `_epics.host`/`port` form still works (one forward). Each forward runs
+  its own circuit on a background thread, reconnecting with backoff; a dead
+  forward never blocks startup.
+- The `snapshot()` / sidecar contract is unchanged — the GUI needs no changes.
 
 ## Fallback regardless of connectivity
 
