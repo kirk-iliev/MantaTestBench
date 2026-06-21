@@ -37,6 +37,7 @@ class PVWriter:
     or None (native)."""
 
     def __init__(self, forwards=None):
+        # forwards=[] (empty) is falsy → native mode; consistent with PVMonitor._normalize_forwards.
         self._forwards = list(forwards) if forwards else None
         self._ctx = None                 # native Context
         self._native_pvs = {}            # pv_name -> PV
@@ -92,28 +93,49 @@ class PVWriter:
             f"no forward serves {pv_name}"
             + (f" (last connect error: {last_err})" if last_err else ""))
 
+    def _evict(self, pv_name):
+        """Close the socket and purge all state for a broken channel."""
+        entry = self._chan_cache.pop(pv_name, None)
+        if entry is not None:
+            sock = entry[0]
+            try:
+                sock.close()
+            except Exception:
+                pass
+            self._conns = [(s, c) for (s, c) in self._conns if s is not sock]
+
     def _put_tunnel(self, pv_name, value, timeout):
+        t0 = time.monotonic()
         sock, circuit, chan = self._ensure_channel(pv_name, timeout)
+        remaining = timeout - (time.monotonic() - t0)
+        if remaining <= 0:
+            self._evict(pv_name)
+            raise WriteError(
+                f"tunnel put {pv_name}={value} timed out establishing channel")
         try:
             req = chan.write(value, notify=True)
             for b in circuit.send(req):
                 sock.sendall(bytes(b))
         except Exception as e:
-            self._chan_cache.pop(pv_name, None)
+            self._evict(pv_name)
             raise WriteError(f"tunnel put {pv_name}={value} send failed: {e}") from e
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + remaining
         ioid = getattr(req, "ioid", None)
         while time.monotonic() < deadline:
+            sub = min(0.5, deadline - time.monotonic())
+            if sub <= 0:
+                break
             try:
-                cmds = _drain(sock, circuit, timeout=0.5)
+                cmds = _drain(sock, circuit, timeout=sub)
             except Exception as e:
-                self._chan_cache.pop(pv_name, None)
-                raise WriteError(f"tunnel put {pv_name}={value} drain failed: {e}") from e
+                self._evict(pv_name)
+                raise WriteError(
+                    f"tunnel put {pv_name}={value} drain failed: {e}") from e
             for cmd in cmds:
                 if isinstance(cmd, ca.WriteNotifyResponse) and (
                         ioid is None or cmd.ioid == ioid):
                     return
-        self._chan_cache.pop(pv_name, None)
+        self._evict(pv_name)
         raise WriteError(f"tunnel put {pv_name}={value} timed out waiting for ack")
 
     def close(self):
@@ -130,3 +152,4 @@ class PVWriter:
             except Exception:
                 pass
             self._ctx = None
+        self._native_pvs = {}
