@@ -100,6 +100,11 @@ def main(argv=None):
 
     io, monitor, writer = _make_epics_io(cfg, args.pv_config)
     try:
+        pvs = [cfg.q1.setpoint_pv, cfg.q1.rbv_pv, cfg.q2.setpoint_pv, cfg.q2.rbv_pv]
+        if not io.wait_connected(pvs, 10.0):
+            print("Scan aborted: required PVs did not connect within 10s "
+                  "(SSH tunnels up? IOC reachable?)")
+            return 1
         with vmbpy.VmbSystem.get_instance() as vmb:
             cam = vmb.get_all_cameras()[0]
             with cam:

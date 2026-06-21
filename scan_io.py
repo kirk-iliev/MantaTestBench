@@ -32,6 +32,18 @@ class MonitorWriterIO:
         snap = self._monitor.snapshot()
         return all(snap.get(pv, {}).get("connected") for pv in pvs)
 
+    def wait_connected(self, pvs, timeout, poll=0.2):
+        """Poll connected() until all pvs are connected or timeout elapses.
+        Returns True if all connected within timeout, else False."""
+        import time
+        deadline = time.monotonic() + timeout
+        while True:
+            if self.connected(pvs):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+
 
 class ScanFrameSaver:
     def __init__(self, run_dir):

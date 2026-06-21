@@ -371,12 +371,19 @@ class _ScanRunner(QThread):
     progress     = pyqtSignal(int, int)
     finished_scan = pyqtSignal(dict)
 
-    def __init__(self, cfg, io, src, run_dir: str, abort_event):
+    def __init__(self, cfg, io, src, run_dir: str, abort_event, pvs=None, connect_timeout=10.0):
         super().__init__()
         self._cfg, self._io, self._src = cfg, io, src
         self._run_dir, self._abort     = run_dir, abort_event
+        self._pvs = pvs or []
+        self._connect_timeout = connect_timeout
 
     def run(self):
+        if not self._io.wait_connected(self._pvs, self._connect_timeout):
+            self.finished_scan.emit({"status": "failed",
+                                     "failure": "required PVs did not connect",
+                                     "failure_point": None, "frames": 0, "rows": []})
+            return
         saver = ScanFrameSaver(self._run_dir)
         try:
             res = run_scan(
@@ -774,12 +781,6 @@ class MainWindow(QMainWindow):
         scan_monitor.start()
         io = MonitorWriterIO(scan_monitor, PVWriter(forwards=forwards))
 
-        if not io.connected(pvs):
-            self.statusBar().showMessage(
-                "Scan: required PVs not connected — check EPICS tunnels / caproto")
-            scan_monitor.stop()
-            return
-
         run_dir = (Path(self._save_dir)
                    / ("scan_" + datetime.now().strftime("%Y%m%d-%H%M%S")))
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -790,7 +791,8 @@ class MainWindow(QMainWindow):
         self._scan_abort   = threading.Event()
 
         self._scan_runner = _ScanRunner(
-            cfg, io, self._scan_src, str(run_dir), self._scan_abort)
+            cfg, io, self._scan_src, str(run_dir), self._scan_abort,
+            pvs=pvs, connect_timeout=10.0)
         self._scan_runner.progress.connect(
             lambda i, j: self.statusBar().showMessage(f"Scan point ({i},{j})"))
         self._scan_runner.finished_scan.connect(self._on_scan_finished)
@@ -1004,6 +1006,11 @@ class MainWindow(QMainWindow):
             self._scan_abort.set()
         if getattr(self, "_scan_runner", None) is not None:
             self._scan_runner.wait(3000)
+        if getattr(self, "_scan_src", None) is not None:
+            try:
+                self._worker.frame_ready.disconnect(self._scan_src.on_frame)
+            except Exception:
+                pass
         if getattr(self, "_scan_monitor", None) is not None:
             self._scan_monitor.stop()
             self._scan_monitor = None

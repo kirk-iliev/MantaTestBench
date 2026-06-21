@@ -54,7 +54,25 @@ def test_io_get_and_connected():
     print("ok  test_io_get_and_connected")
 
 
+def test_wait_connected_polls_until_ready():
+    # Monitor reports disconnected for the first 2 snapshots, then connected.
+    class FlipMonitor:
+        def __init__(self):
+            self.n = 0
+        def snapshot(self):
+            self.n += 1
+            conn = self.n >= 3
+            return {"A:SP": {"value": 1.0, "connected": conn}}
+    io = MonitorWriterIO(FlipMonitor(), FakeWriter())
+    assert io.wait_connected(["A:SP"], timeout=2.0, poll=0.01) is True
+    # Never-connects monitor times out and returns False quickly.
+    io2 = MonitorWriterIO(FakeMonitor({"A:SP": {"value": 1.0, "connected": False}}), FakeWriter())
+    assert io2.wait_connected(["A:SP"], timeout=0.1, poll=0.01) is False
+    print("ok  test_wait_connected_polls_until_ready")
+
+
 if __name__ == "__main__":
     test_saver_writes_tiff_and_sidecar()
     test_io_get_and_connected()
+    test_wait_connected_polls_until_ready()
     print("\nall passed")
