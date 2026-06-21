@@ -134,10 +134,13 @@ def run_scan(cfg: ScanConfig, io, frames, saver, run_dir,
     except Exception as e:
         status, failure, failure_point = "failed", f"{type(e).__name__}: {e}", (i, j)
     finally:
-        if cfg.restore_on_finish:
+        if status != "completed" or cfg.restore_on_finish:
             _restore(io, cfg, pre)
-        _write_manifest(run_dir, rows)
-        _write_config_snapshot(run_dir, cfg)
+        try:
+            _write_manifest(run_dir, rows)
+            _write_config_snapshot(run_dir, cfg)
+        except Exception:
+            pass
 
     return {"status": status, "failure": failure, "failure_point": failure_point,
             "frames": len(rows), "rows": rows}

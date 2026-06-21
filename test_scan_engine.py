@@ -154,6 +154,48 @@ def test_frames_per_point():
     print("ok  test_frames_per_point")
 
 
+def test_validate_refuses_range_outside_limits():
+    # Scan range exceeds the axis limits -> run_scan raises pre-loop (no writes).
+    io = FakeIO(); io.values["Q1:SP"] = 0.0; io.values["Q2:SP"] = 0.0
+    cfg = _cfg(); cfg.q1.limit_max = 0.5   # q1 range is [0,1], now exceeds limit 0.5
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        raised = False
+        try:
+            run_scan(cfg, io, FakeFrames(), FakeSaver(), tmp)
+        except ValueError:
+            raised = True
+    assert raised, "expected ValueError for scan range outside limits"
+    assert io.put_log == [], "no setpoint writes should occur on a refused scan"
+    print("ok  test_validate_refuses_range_outside_limits")
+
+
+def test_set_axis_raises_limit_error_directly():
+    from scan_engine import _set_axis, LimitError
+    ax = AxisConfig(setpoint_pv="Q:SP", rbv_pv="Q:RBV", min=0.0, max=1.0, points=2,
+                    limit_min=-1.0, limit_max=1.0, settle_tol=0.01)
+    io = FakeIO()
+    raised = False
+    try:
+        _set_axis(io, ax, 5.0)   # 5.0 outside [-1,1]
+    except LimitError:
+        raised = True
+    assert raised, "expected LimitError for out-of-limit write"
+    assert io.put_log == [], "no put on a rejected limit"
+    print("ok  test_set_axis_raises_limit_error_directly")
+
+
+def test_fault_restores_even_when_restore_on_finish_false():
+    io = FakeIO(settle_fail=True)      # forces a settle timeout fault
+    io.values["Q1:SP"] = 0.3; io.values["Q2:SP"] = 0.3
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        res = run_scan(_cfg(restore_on_finish=False), io, FakeFrames(), FakeSaver(), tmp)
+    assert res["status"] == "failed", res
+    assert io.values["Q1:SP"] == 0.3 and io.values["Q2:SP"] == 0.3, "fault must restore even with restore_on_finish=False"
+    print("ok  test_fault_restores_even_when_restore_on_finish_false")
+
+
 if __name__ == "__main__":
     test_completes_in_raster_order()
     test_preflight_refuses_when_disconnected()
@@ -161,4 +203,7 @@ if __name__ == "__main__":
     test_trigger_timeout_fails_and_restores()
     test_abort_midscan_restores_and_writes_manifest()
     test_frames_per_point()
+    test_validate_refuses_range_outside_limits()
+    test_set_axis_raises_limit_error_directly()
+    test_fault_restores_even_when_restore_on_finish_false()
     print("\nall passed")
