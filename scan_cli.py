@@ -42,7 +42,6 @@ class _CameraFrameSource:
         cam.queue_frame(frame)
 
     def start(self):
-        import vmbpy
         cam = self._cam
         cam.TriggerSelector.set("FrameStart")
         cam.TriggerMode.set("On")
@@ -100,25 +99,26 @@ def main(argv=None):
     signal.signal(signal.SIGINT, lambda *_: abort.set())
 
     io, monitor, writer = _make_epics_io(cfg, args.pv_config)
-    with vmbpy.VmbSystem.get_instance() as vmb:
-        cam = vmb.get_all_cameras()[0]
-        with cam:
-            src = _CameraFrameSource(cam)
-            src.start()
-            try:
-                saver = ScanFrameSaver(str(run_dir))
-                res = run_scan(cfg, io, src, saver, str(run_dir),
-                               abort_event=abort,
-                               progress_cb=lambda i, j: print(f"  point ({i},{j}) done"))
-            finally:
-                src.stop()
-                monitor.stop()
-                writer.close()
-
-    print(f"Scan {res['status']}: {res['frames']} frames -> {run_dir}")
-    if res["failure"]:
-        print(f"  reason: {res['failure']} at point {res['failure_point']}")
-    return 0 if res["status"] == "completed" else 1
+    try:
+        with vmbpy.VmbSystem.get_instance() as vmb:
+            cam = vmb.get_all_cameras()[0]
+            with cam:
+                src = _CameraFrameSource(cam)
+                src.start()
+                try:
+                    saver = ScanFrameSaver(str(run_dir))
+                    res = run_scan(cfg, io, src, saver, str(run_dir),
+                                   abort_event=abort,
+                                   progress_cb=lambda i, j: print(f"  point ({i},{j}) done"))
+                finally:
+                    src.stop()
+                print(f"Scan {res['status']}: {res['frames']} frames -> {run_dir}")
+                if res["failure"]:
+                    print(f"  reason: {res['failure']} at point {res['failure_point']}")
+                return 0 if res["status"] == "completed" else 1
+    finally:
+        monitor.stop()
+        writer.close()
 
 
 if __name__ == "__main__":
