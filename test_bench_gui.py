@@ -19,11 +19,15 @@ import cv2
 import vmbpy
 
 from pv_monitor import PVMonitor, load_pv_config
+from scan_config import AxisConfig, ScanConfig, validate_config, load_scan_config
+from scan_engine import run_scan
+from scan_io import MonitorWriterIO, ScanFrameSaver
+from epics_control import PVWriter
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QGroupBox, QFormLayout, QDoubleSpinBox, QPushButton,
-    QPlainTextEdit, QFileDialog, QSizePolicy, QCheckBox,
+    QLabel, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
+    QPlainTextEdit, QFileDialog, QSizePolicy, QCheckBox, QLineEdit,
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QImage, QPixmap
@@ -327,6 +331,71 @@ class CameraWorker(QThread):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Scan helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _SignalFrameSource:
+    """FrameSource that latches the next frame emitted by CameraWorker.frame_ready.
+
+    Connect ``worker.frame_ready`` to ``on_frame``; call ``next_triggered_frame``
+    from the scan runner thread to block until a frame arrives (or timeout).
+    """
+
+    def __init__(self):
+        self._lock  = threading.Lock()
+        self._cond  = threading.Condition(self._lock)
+        self._frame = None
+
+    def on_frame(self, frame: np.ndarray):
+        """Slot — connect to CameraWorker.frame_ready."""
+        with self._cond:
+            self._frame = frame
+            self._cond.notify_all()
+
+    def next_triggered_frame(self, timeout: float) -> np.ndarray:
+        """Block until a new frame arrives, then return it. Raises TimeoutError."""
+        with self._cond:
+            self._frame = None          # discard any stale frame
+            if not self._cond.wait_for(lambda: self._frame is not None, timeout=timeout):
+                raise TimeoutError(f"no triggered frame within {timeout}s")
+            return self._frame
+
+
+class _ScanRunner(QThread):
+    """QThread that runs run_scan() off the GUI thread.
+
+    Emits ``progress(i, j)`` after each grid row and ``finished_scan(dict)``
+    when done (always, even on exception — so the GUI is always cleaned up).
+    """
+
+    progress     = pyqtSignal(int, int)
+    finished_scan = pyqtSignal(dict)
+
+    def __init__(self, cfg, io, src, run_dir: str, abort_event):
+        super().__init__()
+        self._cfg, self._io, self._src = cfg, io, src
+        self._run_dir, self._abort     = run_dir, abort_event
+
+    def run(self):
+        saver = ScanFrameSaver(self._run_dir)
+        try:
+            res = run_scan(
+                self._cfg, self._io, self._src, saver, self._run_dir,
+                abort_event=self._abort,
+                progress_cb=lambda i, j: self.progress.emit(i, j),
+            )
+        except Exception as exc:
+            res = {
+                "status":        "failed",
+                "failure":       f"{type(exc).__name__}: {exc}",
+                "failure_point": None,
+                "frames":        0,
+                "rows":          [],
+            }
+        self.finished_scan.emit(res)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main Window
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -405,6 +474,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_stats_group())
         layout.addWidget(self._build_camera_settings_group())
         layout.addWidget(self._build_save_group())
+        layout.addWidget(self._build_scan_group())
         layout.addStretch()
         return panel
 
@@ -534,6 +604,220 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._save_status)
 
         return group
+
+    def _build_scan_group(self) -> QGroupBox:
+        """Return the '2D Scan' group box. Try to pre-fill from scan.json."""
+        group  = QGroupBox("2D Scan")
+        layout = QVBoxLayout(group)
+
+        # Attempt to load defaults from scan.json (optional; fails gracefully).
+        sc = None
+        try:
+            sc = load_scan_config(Path(__file__).parent / "scan.json")
+        except Exception:
+            pass
+
+        def _dbl(val, lo=-1e6, hi=1e6, step=0.1, dec=3):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setValue(val)
+            w.setSingleStep(step)
+            w.setDecimals(dec)
+            return w
+
+        def _spin(val, lo=1, hi=9999):
+            w = QSpinBox()
+            w.setRange(lo, hi)
+            w.setValue(val)
+            return w
+
+        def _ledit(text):
+            return QLineEdit(text)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        # ── Q1 axis ──────────────────────────────────────────────────────
+        self._scan_q1_sp_pv  = _ledit(sc.q1.setpoint_pv  if sc else "")
+        self._scan_q1_rbv_pv = _ledit(sc.q1.rbv_pv       if sc else "")
+        self._scan_q1_min    = _dbl(sc.q1.min             if sc else 0.0)
+        self._scan_q1_max    = _dbl(sc.q1.max             if sc else 1.0)
+        self._scan_q1_pts    = _spin(sc.q1.points         if sc else 3)
+        self._scan_q1_lmin   = _dbl(sc.q1.limit_min       if sc else -10.0)
+        self._scan_q1_lmax   = _dbl(sc.q1.limit_max       if sc else  10.0)
+        self._scan_q1_tol    = _dbl(sc.q1.settle_tol      if sc else  0.01, lo=1e-6, hi=1e3, step=0.001, dec=4)
+
+        form.addRow("Q1 setpt PV:", self._scan_q1_sp_pv)
+        form.addRow("Q1 RBV PV:",   self._scan_q1_rbv_pv)
+
+        q1_rng = QHBoxLayout()
+        q1_rng.addWidget(self._scan_q1_min)
+        q1_rng.addWidget(QLabel("→"))
+        q1_rng.addWidget(self._scan_q1_max)
+        q1_rng.addWidget(QLabel("N:"))
+        q1_rng.addWidget(self._scan_q1_pts)
+        form.addRow("Q1 range:", q1_rng)
+
+        q1_lim = QHBoxLayout()
+        q1_lim.addWidget(self._scan_q1_lmin)
+        q1_lim.addWidget(QLabel("→"))
+        q1_lim.addWidget(self._scan_q1_lmax)
+        q1_lim.addWidget(QLabel("±"))
+        q1_lim.addWidget(self._scan_q1_tol)
+        form.addRow("Q1 lim/tol:", q1_lim)
+
+        # ── Q2 axis ──────────────────────────────────────────────────────
+        self._scan_q2_sp_pv  = _ledit(sc.q2.setpoint_pv  if sc else "")
+        self._scan_q2_rbv_pv = _ledit(sc.q2.rbv_pv       if sc else "")
+        self._scan_q2_min    = _dbl(sc.q2.min             if sc else 0.0)
+        self._scan_q2_max    = _dbl(sc.q2.max             if sc else 1.0)
+        self._scan_q2_pts    = _spin(sc.q2.points         if sc else 3)
+        self._scan_q2_lmin   = _dbl(sc.q2.limit_min       if sc else -10.0)
+        self._scan_q2_lmax   = _dbl(sc.q2.limit_max       if sc else  10.0)
+        self._scan_q2_tol    = _dbl(sc.q2.settle_tol      if sc else  0.01, lo=1e-6, hi=1e3, step=0.001, dec=4)
+
+        form.addRow("Q2 setpt PV:", self._scan_q2_sp_pv)
+        form.addRow("Q2 RBV PV:",   self._scan_q2_rbv_pv)
+
+        q2_rng = QHBoxLayout()
+        q2_rng.addWidget(self._scan_q2_min)
+        q2_rng.addWidget(QLabel("→"))
+        q2_rng.addWidget(self._scan_q2_max)
+        q2_rng.addWidget(QLabel("N:"))
+        q2_rng.addWidget(self._scan_q2_pts)
+        form.addRow("Q2 range:", q2_rng)
+
+        q2_lim = QHBoxLayout()
+        q2_lim.addWidget(self._scan_q2_lmin)
+        q2_lim.addWidget(QLabel("→"))
+        q2_lim.addWidget(self._scan_q2_lmax)
+        q2_lim.addWidget(QLabel("±"))
+        q2_lim.addWidget(self._scan_q2_tol)
+        form.addRow("Q2 lim/tol:", q2_lim)
+
+        # ── Global params ─────────────────────────────────────────────────
+        self._scan_fpp    = _spin(sc.frames_per_point if sc else 1)
+        self._scan_settle = _dbl(sc.settle_timeout_s  if sc else 10.0, lo=0.1, hi=3600.0, step=1.0, dec=1)
+        self._scan_trig   = _dbl(sc.trigger_timeout_s if sc else 30.0, lo=0.1, hi=3600.0, step=1.0, dec=1)
+
+        form.addRow("Frames/pt:",   self._scan_fpp)
+        form.addRow("Settle tmo s:", self._scan_settle)
+        form.addRow("Trig tmo s:",   self._scan_trig)
+
+        # ── Run / Stop ────────────────────────────────────────────────────
+        self._scan_run_btn  = QPushButton("Run Scan")
+        self._scan_stop_btn = QPushButton("Stop")
+        self._scan_stop_btn.setEnabled(False)
+        self._scan_run_btn.clicked.connect(self._start_scan)
+        self._scan_stop_btn.clicked.connect(self._stop_scan)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._scan_run_btn)
+        btn_row.addWidget(self._scan_stop_btn)
+        layout.addLayout(btn_row)
+
+        return group
+
+    def _build_scan_config_from_fields(self) -> ScanConfig:
+        """Read UI spinbox/lineedit fields into AxisConfig / ScanConfig."""
+        q1 = AxisConfig(
+            setpoint_pv=self._scan_q1_sp_pv.text().strip(),
+            rbv_pv=self._scan_q1_rbv_pv.text().strip(),
+            min=self._scan_q1_min.value(),
+            max=self._scan_q1_max.value(),
+            points=self._scan_q1_pts.value(),
+            limit_min=self._scan_q1_lmin.value(),
+            limit_max=self._scan_q1_lmax.value(),
+            settle_tol=self._scan_q1_tol.value(),
+        )
+        q2 = AxisConfig(
+            setpoint_pv=self._scan_q2_sp_pv.text().strip(),
+            rbv_pv=self._scan_q2_rbv_pv.text().strip(),
+            min=self._scan_q2_min.value(),
+            max=self._scan_q2_max.value(),
+            points=self._scan_q2_pts.value(),
+            limit_min=self._scan_q2_lmin.value(),
+            limit_max=self._scan_q2_lmax.value(),
+            settle_tol=self._scan_q2_tol.value(),
+        )
+        return ScanConfig(
+            q1=q1, q2=q2,
+            settle_timeout_s=self._scan_settle.value(),
+            settle_poll_s=0.1,
+            frames_per_point=self._scan_fpp.value(),
+            trigger_timeout_s=self._scan_trig.value(),
+            restore_on_finish=True,
+            output_dir=str(self._save_dir),
+        )
+
+    def _start_scan(self):
+        cfg = self._build_scan_config_from_fields()
+        try:
+            validate_config(cfg)
+        except ValueError as e:
+            self.statusBar().showMessage(f"Scan config invalid: {e}")
+            return
+
+        pvs = [cfg.q1.setpoint_pv, cfg.q1.rbv_pv,
+               cfg.q2.setpoint_pv, cfg.q2.rbv_pv]
+        if not all(p for p in pvs):
+            self.statusBar().showMessage("Scan: fill in all PV name fields")
+            return
+
+        _pv_map, forwards = load_pv_config(Path(__file__).parent / "pv_config.json")
+
+        # Build a dedicated PVMonitor keyed by PV name (label == pv name) so
+        # MonitorWriterIO.get(pv) and .connected(pvs) can look up by PV name.
+        # self._pv_monitor uses labels from pv_config.json (e.g. "q1_current_a")
+        # which do not match raw PV names, so it cannot serve the scan's
+        # connectivity checks or readback calls.
+        scan_monitor = PVMonitor({pv: pv for pv in pvs}, tunnel_cfg=forwards)
+        scan_monitor.start()
+        io = MonitorWriterIO(scan_monitor, PVWriter(forwards=forwards))
+
+        if not io.connected(pvs):
+            self.statusBar().showMessage(
+                "Scan: required PVs not connected — check EPICS tunnels / caproto")
+            scan_monitor.stop()
+            return
+
+        run_dir = (Path(self._save_dir)
+                   / ("scan_" + datetime.now().strftime("%Y%m%d-%H%M%S")))
+        run_dir.mkdir(parents=True, exist_ok=False)
+
+        self._scan_monitor = scan_monitor
+        self._scan_src     = _SignalFrameSource()
+        self._worker.frame_ready.connect(self._scan_src.on_frame)
+        self._scan_abort   = threading.Event()
+
+        self._scan_runner = _ScanRunner(
+            cfg, io, self._scan_src, str(run_dir), self._scan_abort)
+        self._scan_runner.progress.connect(
+            lambda i, j: self.statusBar().showMessage(f"Scan point ({i},{j})"))
+        self._scan_runner.finished_scan.connect(self._on_scan_finished)
+        self._scan_runner.start()
+
+        self._scan_run_btn.setEnabled(False)
+        self._scan_stop_btn.setEnabled(True)
+        self.statusBar().showMessage(f"Scan started → {run_dir.name}")
+
+    def _stop_scan(self):
+        if getattr(self, "_scan_abort", None) is not None:
+            self._scan_abort.set()
+
+    def _on_scan_finished(self, res: dict):
+        try:
+            self._worker.frame_ready.disconnect(self._scan_src.on_frame)
+        except Exception:
+            pass
+        if getattr(self, "_scan_monitor", None) is not None:
+            self._scan_monitor.stop()
+            self._scan_monitor = None
+        self._scan_run_btn.setEnabled(True)
+        self._scan_stop_btn.setEnabled(False)
+        msg = f"Scan {res['status']}: {res['frames']} frames"
+        if res.get("failure"):
+            msg += f" — {res['failure']} at {res['failure_point']}"
+        self.statusBar().showMessage(msg)
 
     # ── Camera startup ────────────────────────────────────────────────────
 
@@ -715,6 +999,14 @@ class MainWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        # Abort any in-progress scan and wait for its thread to finish.
+        if getattr(self, "_scan_abort", None) is not None:
+            self._scan_abort.set()
+        if getattr(self, "_scan_runner", None) is not None:
+            self._scan_runner.wait(3000)
+        if getattr(self, "_scan_monitor", None) is not None:
+            self._scan_monitor.stop()
+            self._scan_monitor = None
         self._worker.stop()
         self._worker.wait(3000)
         if self._pv_monitor is not None:
