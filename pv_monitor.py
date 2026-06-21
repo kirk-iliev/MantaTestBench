@@ -57,8 +57,9 @@ _RETRY_DELAYS = (2.0, 5.0, 10.0, 30.0)
 def load_pv_config(path):
     """Load PV config from JSON. Returns ``(pv_map, tunnel_cfg)``.
 
-    ``pv_map`` is a ``{label: pv_name}`` dict. ``tunnel_cfg`` is
-    ``{"host": str, "port": int}`` when tunnel mode is requested, else ``None``.
+    ``pv_map`` is a ``{label: pv_name}`` dict. ``tunnel_cfg`` is a list of
+    ``{"host": str, "port": int}`` forwards (one per ``ssh -L`` local port)
+    when tunnel mode is requested, else ``None``.
 
     Accepts either an object ``{"q1_current": "PV:NAME", ...}`` or a bare list
     ``["PV:NAME", ...]`` (each PV name then doubles as its own label). In object
@@ -66,12 +67,16 @@ def load_pv_config(path):
     ``_epics`` key configures tunnel mode::
 
         {
-          "_epics": {"host": "localhost", "port": 15064},
+          "_epics": {"forwards": [{"host": "localhost", "port": 15064},
+                                  {"host": "localhost", "port": 15065}]},
           "gun_phase_deg": "EGUN:PHASE:RBV"
         }
 
-    Tunnel mode is active only when ``_epics.host`` is a non-empty string. An
-    empty/absent host means native mode (the original behaviour). Missing,
+    Tunnel mode is requested by either ``_epics.forwards`` (a non-empty list of
+    ``{"host","port"}`` entries) OR a non-empty ``_epics.host`` (the original
+    single-forward back-compat form, normalized to a one-element list);
+    ``forwards`` takes precedence when both are present. An empty/absent
+    ``_epics`` block means native mode (the original behaviour). Missing,
     empty, or malformed files return ``({}, None)``.
     """
     path = Path(path)

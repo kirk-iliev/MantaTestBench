@@ -118,6 +118,7 @@ def test_multi_forward_start_never_blocks_or_raises():
     mon.start()
     elapsed = time.monotonic() - t0
     assert elapsed < 0.5, f"start() blocked for {elapsed:.2f}s"
+    assert len(mon._tunnel_threads) == 2, mon._tunnel_threads
 
     snap = mon.snapshot()
     assert set(snap) == {"a", "b"}

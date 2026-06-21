@@ -113,8 +113,8 @@ ssh -L 15064:<ioc-host-or-ip>:5064  you@controls-gateway
   areaDetector camera IOCs with a fixed `EPICS_CA_SERVER_PORT`; not guaranteed
   for arbitrary PVs that use ephemeral ports negotiated during search).
 - One forward = one IOC's port. Our PVs span subsystems (EGUN:*, GTL:*) that may
-  be **different IOCs on different ports** → need a forward per IOC, or (better)
-  a **CA gateway** on the jump host multiplexing them behind one port.
+  be **different IOCs on different ports** → need a forward per IOC (implemented),
+  or a **CA gateway** on the jump host multiplexing them behind one port.
 
 ### Multi-forward recipe (implemented)
 
@@ -131,11 +131,14 @@ ssh -L 15064:131.243.89.29:35131 \
 Then in `pv_config.json`:
 
 ```json
-"_epics": {
-  "forwards": [
-    {"host": "localhost", "port": 15064},
-    {"host": "localhost", "port": 15065}
-  ]
+{
+  "_epics": {
+    "forwards": [
+      {"host": "localhost", "port": 15064},
+      {"host": "localhost", "port": 15065}
+    ]
+  },
+  "gun_phase_deg": "EGUN:PHASE:RBV"
 }
 ```
 
