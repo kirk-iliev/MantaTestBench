@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton,
     QPlainTextEdit, QFileDialog, QSizePolicy, QCheckBox, QLineEdit,
+    QScrollArea, QFrame,
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QImage, QPixmap
@@ -483,7 +484,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_save_group())
         layout.addWidget(self._build_scan_group())
         layout.addStretch()
-        return panel
+
+        # Wrap the controls in a scroll area so the panel's tall content
+        # (stats + camera + save + scan groups) does not force the whole
+        # window taller than the display. The scroll area's own minimum
+        # height is small, so the window stays resizable and the controls
+        # scroll instead of clipping off-screen.
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFixedWidth(285 + 18)   # panel width + room for the scrollbar
+        return scroll
 
     def _build_stats_group(self) -> QGroupBox:
         group = QGroupBox("Stats")
