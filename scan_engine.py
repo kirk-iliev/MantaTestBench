@@ -97,6 +97,14 @@ def _write_config_snapshot(run_dir, cfg):
     (Path(run_dir) / "scan_config.json").write_text(json.dumps(snap, indent=2))
 
 
+def failed_result(failure, failure_point=None):
+    """Build the canonical 'failed' scan-result dict — same schema run_scan
+    returns — for callers that bail before run_scan runs (e.g. PVs never
+    connected) or that catch an exception around it."""
+    return {"status": "failed", "failure": failure,
+            "failure_point": failure_point, "frames": 0, "rows": []}
+
+
 def run_scan(cfg: ScanConfig, io, frames, saver, run_dir,
              abort_event=None, progress_cb=None) -> dict:
     validate_config(cfg)                       # raises ValueError on bad config

@@ -8,6 +8,7 @@
     per frame into a run directory.
 """
 
+import time
 from pathlib import Path
 
 import cv2
@@ -41,7 +42,6 @@ class MonitorWriterIO:
     def wait_connected(self, pvs, timeout, poll=0.2):
         """Poll connected() until all pvs are connected or timeout elapses.
         Returns True if all connected within timeout, else False."""
-        import time
         deadline = time.monotonic() + timeout
         while True:
             if self.connected(pvs):

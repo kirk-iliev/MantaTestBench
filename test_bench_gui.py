@@ -20,7 +20,7 @@ import vmbpy
 
 from pv_monitor import PVMonitor, load_pv_config
 from scan_config import AxisConfig, ScanConfig, validate_config, load_scan_config
-from scan_engine import run_scan
+from scan_engine import run_scan, failed_result
 from scan_io import MonitorWriterIO, ScanFrameSaver
 from epics_control import PVWriter
 
@@ -381,9 +381,7 @@ class _ScanRunner(QThread):
 
     def run(self):
         if not self._io.wait_connected(self._pvs, self._connect_timeout):
-            self.finished_scan.emit({"status": "failed",
-                                     "failure": "required PVs did not connect",
-                                     "failure_point": None, "frames": 0, "rows": []})
+            self.finished_scan.emit(failed_result("required PVs did not connect"))
             return
         saver = ScanFrameSaver(self._run_dir)
         try:
@@ -393,13 +391,7 @@ class _ScanRunner(QThread):
                 progress_cb=lambda i, j: self.progress.emit(i, j),
             )
         except Exception as exc:
-            res = {
-                "status":        "failed",
-                "failure":       f"{type(exc).__name__}: {exc}",
-                "failure_point": None,
-                "frames":        0,
-                "rows":          [],
-            }
+            res = failed_result(f"{type(exc).__name__}: {exc}")
         self.finished_scan.emit(res)
 
 
@@ -805,6 +797,12 @@ class MainWindow(QMainWindow):
         self._scan_monitor = scan_monitor
         self._scan_io      = io
         self._scan_src     = _SignalFrameSource()
+        # _SignalFrameSource is a plain object (not a QObject), so this is a
+        # direct connection: on_frame runs on the thread that emits frame_ready
+        # (vmbpy's callback thread), while next_triggered_frame blocks on the
+        # _ScanRunner thread — the two rendezvous via the source's Condition.
+        # If _SignalFrameSource ever becomes a QObject this flips to a queued
+        # connection and the scan thread would block forever; keep it a plain object.
         self._worker.frame_ready.connect(self._scan_src.on_frame)
         self._scan_abort   = threading.Event()
 
@@ -825,6 +823,11 @@ class MainWindow(QMainWindow):
             self._scan_abort.set()
 
     def _on_scan_finished(self, res: dict):
+        # run() has already returned by the time this queued slot fires, but
+        # wait() makes the thread's lifetime explicit before the next scan
+        # reassigns self._scan_runner (dropping a still-running QThread crashes).
+        if getattr(self, "_scan_runner", None) is not None:
+            self._scan_runner.wait(3000)
         try:
             self._worker.frame_ready.disconnect(self._scan_src.on_frame)
         except Exception:
