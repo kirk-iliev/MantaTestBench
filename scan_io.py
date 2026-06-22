@@ -32,6 +32,12 @@ class MonitorWriterIO:
         snap = self._monitor.snapshot()
         return all(snap.get(pv, {}).get("connected") for pv in pvs)
 
+    def get_timestamp(self, pv):
+        rec = self._monitor.snapshot().get(pv)
+        if rec is None or not rec.get("connected"):
+            return None
+        return rec.get("timestamp")
+
     def wait_connected(self, pvs, timeout, poll=0.2):
         """Poll connected() until all pvs are connected or timeout elapses.
         Returns True if all connected within timeout, else False."""
@@ -63,7 +69,8 @@ class ScanFrameSaver:
             lines.append(f"{key}_setpoint: {val}")
         for key, val in rbvs.items():
             lines.append(f"{key}_rbv: {val}")
-        lines.append(f"wall_timestamp: {timestamps['wall']}")
+        for key, val in timestamps.items():
+            lines.append(f"{key}_timestamp: {val}")
         lines.append(f"indices: {i},{j},{k}")
         (self._run_dir / f"{stem}.txt").write_text("\n".join(lines) + "\n")
         return tiff.name

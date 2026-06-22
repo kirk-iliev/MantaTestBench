@@ -22,6 +22,7 @@ class EpicsIO(Protocol):
     def put(self, pv: str, value: float) -> None: ...
     def get(self, pv: str): ...                       # -> float | None
     def connected(self, pvs) -> bool: ...
+    def get_timestamp(self, pv: str): ...             # -> float | None (IOC source timestamp)
 
 
 class FrameSource(Protocol):
@@ -78,7 +79,7 @@ def _restore(io, cfg, pre):
 
 def _write_manifest(run_dir, rows):
     cols = ["i", "j", "k", "q1_setpoint", "q2_setpoint", "q1_rbv", "q2_rbv",
-            "wall_timestamp", "filename", "status"]
+            "q1_ioc_timestamp", "q2_ioc_timestamp", "wall_timestamp", "filename", "status"]
     path = Path(run_dir) / "manifest.csv"
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -120,13 +121,15 @@ def run_scan(cfg: ScanConfig, io, frames, saver, run_dir,
                 _check_abort(abort_event)
                 frame = frames.next_triggered_frame(cfg.trigger_timeout_s)
                 rbvs = {"q1": io.get(cfg.q1.rbv_pv), "q2": io.get(cfg.q2.rbv_pv)}
+                ioc = {"q1": io.get_timestamp(cfg.q1.rbv_pv),
+                       "q2": io.get_timestamp(cfg.q2.rbv_pv)}
                 setpoints = {"q1": q1, "q2": q2}
-                ts = {"wall": time.time()}
+                ts = {"wall": time.time(), "q1_ioc": ioc["q1"], "q2_ioc": ioc["q2"]}
                 fname = saver.save(frame, (i, j, k), setpoints, rbvs, ts)
                 rows.append({"i": i, "j": j, "k": k, "q1_setpoint": q1,
-                             "q2_setpoint": q2, "q1_rbv": rbvs["q1"],
-                             "q2_rbv": rbvs["q2"], "wall_timestamp": ts["wall"],
-                             "filename": fname, "status": "ok"})
+                             "q2_setpoint": q2, "q1_rbv": rbvs["q1"], "q2_rbv": rbvs["q2"],
+                             "q1_ioc_timestamp": ioc["q1"], "q2_ioc_timestamp": ioc["q2"],
+                             "wall_timestamp": ts["wall"], "filename": fname, "status": "ok"})
             if progress_cb is not None:
                 progress_cb(i, j)
     except ScanAborted as e:

@@ -33,13 +33,17 @@ def test_saver_writes_tiff_and_sidecar():
         frame = np.arange(4, dtype=np.uint16).reshape(2, 2)
         fname = saver.save(frame, (1, 2, 0),
                            {"q1": 0.5, "q2": 10.0},
-                           {"q1": 0.49, "q2": 9.98}, {"wall": 123.0})
+                           {"q1": 0.49, "q2": 9.98},
+                           {"wall": 123.0, "q1_ioc": 555.0, "q2_ioc": 666.0})
         tiff = Path(tmp) / fname
         sidecar = tiff.with_suffix(".txt")
         assert tiff.exists() and "q1_1_q2_2_shot_0" in fname, fname
         assert sidecar.exists()
         text = sidecar.read_text()
         assert "q1_setpoint: 0.5" in text and "q2_rbv: 9.98" in text, text
+        assert "wall_timestamp: 123.0" in text, text
+        assert "q1_ioc_timestamp: 555.0" in text, text
+        assert "q2_ioc_timestamp: 666.0" in text, text
     print("ok  test_saver_writes_tiff_and_sidecar")
 
 
@@ -65,6 +69,16 @@ def test_io_close_closes_writer():
     print("ok  test_io_close_closes_writer")
 
 
+def test_io_get_timestamp():
+    snap = {"A:RBV": {"value": 0.99, "timestamp": 555.0, "connected": True},
+            "B:RBV": {"value": 1.0, "timestamp": 666.0, "connected": False}}
+    io = MonitorWriterIO(FakeMonitor(snap), FakeWriter())
+    assert io.get_timestamp("A:RBV") == 555.0
+    assert io.get_timestamp("B:RBV") is None   # disconnected -> None
+    assert io.get_timestamp("missing") is None
+    print("ok  test_io_get_timestamp")
+
+
 def test_wait_connected_polls_until_ready():
     # Monitor reports disconnected for the first 2 snapshots, then connected.
     class FlipMonitor:
@@ -86,5 +100,6 @@ if __name__ == "__main__":
     test_saver_writes_tiff_and_sidecar()
     test_io_get_and_connected()
     test_io_close_closes_writer()
+    test_io_get_timestamp()
     test_wait_connected_polls_until_ready()
     print("\nall passed")

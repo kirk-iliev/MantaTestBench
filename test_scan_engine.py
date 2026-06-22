@@ -35,6 +35,8 @@ class FakeIO:
         return self.values.get(pv)
     def connected(self, pvs):
         return not self.disconnected
+    def get_timestamp(self, pv):
+        return 1234.5 if self.get(pv) is not None else None
 
 
 class FakeFrames:
@@ -139,6 +141,8 @@ def test_abort_midscan_restores_and_writes_manifest():
     assert len(saver.saves) == 1, saver.saves         # only first point done
     assert len(rows) == 1
     assert io.values["Q1:SP"] == 9.0 and io.values["Q2:SP"] == 9.0  # restored
+    assert "q1_ioc_timestamp" in rows[0] and rows[0]["q1_ioc_timestamp"] == "1234.5", rows[0]
+    assert "q2_ioc_timestamp" in rows[0] and rows[0]["q2_ioc_timestamp"] == "1234.5", rows[0]
     print("ok  test_abort_midscan_restores_and_writes_manifest")
 
 
