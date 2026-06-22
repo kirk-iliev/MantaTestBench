@@ -757,6 +757,9 @@ class MainWindow(QMainWindow):
         )
 
     def _start_scan(self):
+        if getattr(self, "_worker", None) is None:
+            self.statusBar().showMessage("Start the camera before running a scan")
+            return
         cfg = self._build_scan_config_from_fields()
         try:
             validate_config(cfg)
@@ -786,6 +789,7 @@ class MainWindow(QMainWindow):
         run_dir.mkdir(parents=True, exist_ok=False)
 
         self._scan_monitor = scan_monitor
+        self._scan_io      = io
         self._scan_src     = _SignalFrameSource()
         self._worker.frame_ready.connect(self._scan_src.on_frame)
         self._scan_abort   = threading.Event()
@@ -814,6 +818,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_scan_monitor", None) is not None:
             self._scan_monitor.stop()
             self._scan_monitor = None
+        if getattr(self, "_scan_io", None) is not None:
+            try:
+                self._scan_io.close()
+            except Exception:
+                pass
+            self._scan_io = None
         self._scan_run_btn.setEnabled(True)
         self._scan_stop_btn.setEnabled(False)
         msg = f"Scan {res['status']}: {res['frames']} frames"
@@ -1014,6 +1024,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_scan_monitor", None) is not None:
             self._scan_monitor.stop()
             self._scan_monitor = None
+        if getattr(self, "_scan_io", None) is not None:
+            try:
+                self._scan_io.close()
+            except Exception:
+                pass
+            self._scan_io = None
         self._worker.stop()
         self._worker.wait(3000)
         if self._pv_monitor is not None:

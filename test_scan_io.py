@@ -20,8 +20,11 @@ class FakeMonitor:
 class FakeWriter:
     def __init__(self):
         self.puts = []
+        self.closed = False
     def put(self, pv, value, timeout=5.0):
         self.puts.append((pv, value))
+    def close(self):
+        self.closed = True
 
 
 def test_saver_writes_tiff_and_sidecar():
@@ -54,6 +57,14 @@ def test_io_get_and_connected():
     print("ok  test_io_get_and_connected")
 
 
+def test_io_close_closes_writer():
+    w = FakeWriter()
+    io = MonitorWriterIO(FakeMonitor({}), w)
+    io.close()
+    assert w.closed is True
+    print("ok  test_io_close_closes_writer")
+
+
 def test_wait_connected_polls_until_ready():
     # Monitor reports disconnected for the first 2 snapshots, then connected.
     class FlipMonitor:
@@ -74,5 +85,6 @@ def test_wait_connected_polls_until_ready():
 if __name__ == "__main__":
     test_saver_writes_tiff_and_sidecar()
     test_io_get_and_connected()
+    test_io_close_closes_writer()
     test_wait_connected_polls_until_ready()
     print("\nall passed")

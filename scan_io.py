@@ -44,6 +44,9 @@ class MonitorWriterIO:
                 return False
             time.sleep(poll)
 
+    def close(self):
+        self._writer.close()
+
 
 class ScanFrameSaver:
     def __init__(self, run_dir):
