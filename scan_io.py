@@ -33,6 +33,24 @@ class MonitorWriterIO:
         snap = self._monitor.snapshot()
         return all(snap.get(pv, {}).get("connected") for pv in pvs)
 
+    def get_raw(self, pv):
+        """Raw value without float coercion: scalars as float, waveforms as a
+        plain list (JSON-serializable), None if unset/disconnected."""
+        rec = self._monitor.snapshot().get(pv)
+        if rec is None or not rec.get("connected"):
+            return None
+        v = rec.get("value")
+        if v is None:
+            return None
+        if hasattr(v, "tolist"):          # numpy array (waveform)
+            return v.tolist()
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return v
+
     def get_timestamp(self, pv):
         rec = self._monitor.snapshot().get(pv)
         if rec is None or not rec.get("connected"):
@@ -58,7 +76,8 @@ class ScanFrameSaver:
     def __init__(self, run_dir):
         self._run_dir = Path(run_dir)
 
-    def save(self, frame, indices, setpoints, rbvs, timestamps):
+    def save(self, frame, indices, setpoints, rbvs, timestamps,
+             beam=None, decoded=None):
         i, j, k = indices
         stem = f"q1_{i}_q2_{j}_shot_{k}"
         tiff = self._run_dir / f"{stem}.tiff"
@@ -71,6 +90,12 @@ class ScanFrameSaver:
             lines.append(f"{key}_rbv: {val}")
         for key, val in timestamps.items():
             lines.append(f"{key}_timestamp: {val}")
+        if decoded:
+            for key, val in decoded.items():
+                lines.append(f"timinjreq_{key}: {val}")
+        if beam:
+            for pv, rec in beam.items():
+                lines.append(f"beam[{pv}]: {rec.get('value')} (ts={rec.get('timestamp')})")
         lines.append(f"indices: {i},{j},{k}")
         (self._run_dir / f"{stem}.txt").write_text("\n".join(lines) + "\n")
         return tiff.name

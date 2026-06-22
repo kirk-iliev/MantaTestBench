@@ -3,7 +3,7 @@
 validation. Pure logic — no hardware, no I/O beyond reading the JSON file."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -29,6 +29,11 @@ class ScanConfig:
     trigger_timeout_s: float
     restore_on_finish: bool
     output_dir: str
+    # Extra PVs snapshotted (best-effort) at every frame for beam provenance,
+    # e.g. ["TimInjReq", "EG______BIAS___AM01"]. A "TimInjReq" waveform is also
+    # decoded into named columns (bucket/bunches/mode/inhibit/seq). Never gates
+    # the scan: an unreadable meta PV is logged as null, not a fault.
+    beam_meta_pvs: list = field(default_factory=list)
 
 
 def _axis_from(d):
@@ -50,7 +55,8 @@ def load_scan_config(path) -> ScanConfig:
         frames_per_point=int(doc.get("frames_per_point", 1)),
         trigger_timeout_s=float(doc.get("trigger_timeout_s", 30.0)),
         restore_on_finish=bool(doc.get("restore_on_finish", True)),
-        output_dir=str(doc.get("output_dir", "scans")))
+        output_dir=str(doc.get("output_dir", "scans")),
+        beam_meta_pvs=[str(p) for p in doc.get("beam_meta_pvs", [])])
 
 
 def axis_points(axis: AxisConfig) -> list:

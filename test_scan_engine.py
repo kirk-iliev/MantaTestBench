@@ -33,6 +33,8 @@ class FakeIO:
                 return None
             return sp
         return self.values.get(pv)
+    def get_raw(self, pv):
+        return self.values.get(pv)        # no float coercion (waveforms pass through)
     def connected(self, pvs):
         return not self.disconnected
     def get_timestamp(self, pv):
@@ -53,8 +55,9 @@ class FakeFrames:
 class FakeSaver:
     def __init__(self):
         self.saves = []
-    def save(self, frame, indices, setpoints, rbvs, timestamps):
-        self.saves.append((indices, dict(setpoints), dict(rbvs)))
+    def save(self, frame, indices, setpoints, rbvs, timestamps, beam=None, decoded=None):
+        self.saves.append((indices, dict(setpoints), dict(rbvs),
+                           dict(beam or {}), dict(decoded or {})))
         return f"img_{indices[0]}_{indices[1]}_{indices[2]}.tiff"
 
 
@@ -200,6 +203,45 @@ def test_fault_restores_even_when_restore_on_finish_false():
     print("ok  test_fault_restores_even_when_restore_on_finish_false")
 
 
+def test_beam_metadata_decoded_and_logged():
+    import json
+    io = FakeIO(); io.values["Q1:SP"] = 0.0; io.values["Q2:SP"] = 0.0
+    # TimInjReq waveform: bucket=3, bunches=4, mode=40, inhibit=0, ..., seq=7
+    io.values["TimInjReq"] = [3, 4, 40, 0, 1832886, 60239272, 7]
+    io.values["EG______BIAS___AM01"] = 42.5
+    saver = FakeSaver()
+    cfg = _cfg(beam_meta_pvs=["TimInjReq", "EG______BIAS___AM01"])
+    with tempfile.TemporaryDirectory() as tmp:
+        res = run_scan(cfg, io, FakeFrames(), saver, tmp)
+        rows = list(csv.DictReader((Path(tmp) / "manifest.csv").open()))
+    assert res["status"] == "completed", res
+    # decoded fields reached the saver
+    _, _, _, beam, decoded = saver.saves[0]
+    assert decoded == {"target_bucket": 3, "gun_bunches": 4, "inj_mode": 40,
+                       "gun_inhibit": 0, "inj_seq": 7}, decoded
+    assert beam["EG______BIAS___AM01"]["value"] == 42.5, beam
+    # manifest carries decoded columns + the raw beam_meta JSON blob
+    r = rows[0]
+    assert r["target_bucket"] == "3" and r["gun_bunches"] == "4", r
+    assert r["inj_mode"] == "40" and r["inj_seq"] == "7", r
+    blob = json.loads(r["beam_meta"])
+    assert blob["TimInjReq"]["value"] == [3, 4, 40, 0, 1832886, 60239272, 7], blob
+    print("ok  test_beam_metadata_decoded_and_logged")
+
+
+def test_no_beam_meta_pvs_is_clean():
+    # Default config (no beam_meta_pvs): decoded columns present but empty,
+    # beam_meta is an empty JSON object. No crash, no spurious data.
+    import json
+    io = FakeIO(); io.values["Q1:SP"] = 0.0; io.values["Q2:SP"] = 0.0
+    with tempfile.TemporaryDirectory() as tmp:
+        run_scan(_cfg(), io, FakeFrames(), FakeSaver(), tmp)
+        rows = list(csv.DictReader((Path(tmp) / "manifest.csv").open()))
+    assert rows[0]["target_bucket"] == "" and rows[0]["inj_mode"] == "", rows[0]
+    assert json.loads(rows[0]["beam_meta"]) == {}, rows[0]
+    print("ok  test_no_beam_meta_pvs_is_clean")
+
+
 if __name__ == "__main__":
     test_completes_in_raster_order()
     test_preflight_refuses_when_disconnected()
@@ -207,6 +249,8 @@ if __name__ == "__main__":
     test_trigger_timeout_fails_and_restores()
     test_abort_midscan_restores_and_writes_manifest()
     test_frames_per_point()
+    test_beam_metadata_decoded_and_logged()
+    test_no_beam_meta_pvs_is_clean()
     test_validate_refuses_range_outside_limits()
     test_set_axis_raises_limit_error_directly()
     test_fault_restores_even_when_restore_on_finish_false()

@@ -786,7 +786,11 @@ class MainWindow(QMainWindow):
         # self._pv_monitor uses labels from pv_config.json (e.g. "q1_current_a")
         # which do not match raw PV names, so it cannot serve the scan's
         # connectivity checks or readback calls.
-        scan_monitor = PVMonitor({pv: pv for pv in pvs}, tunnel_cfg=forwards)
+        # Monitor the quad PVs plus any beam-metadata PVs (TimInjReq, gun bias,
+        # …) so they're cached for per-frame snapshots. Beam-meta PVs are NOT
+        # added to the `pvs` connectivity gate below — they're best-effort.
+        mon_pvs = pvs + [p for p in cfg.beam_meta_pvs if p not in pvs]
+        scan_monitor = PVMonitor({pv: pv for pv in mon_pvs}, tunnel_cfg=forwards)
         scan_monitor.start()
         io = MonitorWriterIO(scan_monitor, PVWriter(forwards=forwards))
 

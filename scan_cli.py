@@ -56,6 +56,16 @@ class _CameraFrameSource:
             pass
 
     def next_triggered_frame(self, timeout):
+        # Discard frames captured while the magnets were ramping/settling so we
+        # return a genuinely post-settle shot, not a stale queued one. Mirrors
+        # the GUI _SignalFrameSource, which drops its latched frame before
+        # waiting. Without this drain, a shot triggered during the move sits in
+        # the queue and gets mis-attributed to the new setpoint.
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
         try:
             return self._q.get(timeout=timeout)
         except queue.Empty as e:
@@ -65,7 +75,10 @@ class _CameraFrameSource:
 def _make_epics_io(cfg, pv_config_path):
     _pv_map, forwards = load_pv_config(pv_config_path)
     pvs = [cfg.q1.setpoint_pv, cfg.q1.rbv_pv, cfg.q2.setpoint_pv, cfg.q2.rbv_pv]
-    monitor = PVMonitor({pv: pv for pv in pvs}, tunnel_cfg=forwards)
+    # Beam-metadata PVs are monitored too (so they're cached for per-frame
+    # snapshots) but are NOT part of the connectivity gate — they're best-effort.
+    mon_pvs = pvs + [p for p in cfg.beam_meta_pvs if p not in pvs]
+    monitor = PVMonitor({pv: pv for pv in mon_pvs}, tunnel_cfg=forwards)
     monitor.start()
     writer = PVWriter(forwards=forwards)
     return MonitorWriterIO(monitor, writer), monitor, writer

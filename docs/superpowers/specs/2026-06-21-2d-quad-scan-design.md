@@ -152,9 +152,21 @@ disconnect, rejected/failed write, out-of-limit (caught at validation).
   "frames_per_point": 1,
   "trigger_timeout_s": 30.0,
   "restore_on_finish": true,
-  "output_dir": "scans"
+  "output_dir": "scans",
+  "beam_meta_pvs": ["TimInjReq", "EG______BIAS___AM01"]
 }
 ```
+
+- `beam_meta_pvs` (optional, default `[]`): extra PVs snapshotted **best-effort**
+  at every frame for beam provenance — they are monitored but are *not* part of
+  the connectivity gate, so an unreadable one logs `null` rather than aborting
+  the scan. A `TimInjReq` waveform is additionally decoded into named manifest
+  columns: `target_bucket, gun_bunches, inj_mode, gun_inhibit, inj_seq` (ALS
+  dual-EVG injection request; see `srinjectoneshot.m`). The full raw snapshot is
+  also written as a JSON `beam_meta` column and into each `.txt` sidecar. For a
+  Linac-screen scan the useful set is the gun shot params (`TimInjReq`) + gun
+  bias readback (`EG______BIAS___AM01`). Confirm every PV name with `caget`
+  first — these come from a static MML snapshot, not a live IOC.
 
 - `min/max/points` define the scan range; `limit_min/limit_max` are the hard
   safety clamps the range must fall within (validated at start).

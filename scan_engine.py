@@ -21,6 +21,7 @@ from scan_config import ScanConfig, validate_config, generate_grid
 class EpicsIO(Protocol):
     def put(self, pv: str, value: float) -> None: ...
     def get(self, pv: str): ...                       # -> float | None
+    def get_raw(self, pv: str): ...                   # -> scalar|list|None (no float coercion; for waveforms)
     def connected(self, pvs) -> bool: ...
     def get_timestamp(self, pv: str): ...             # -> float | None (IOC source timestamp)
 
@@ -30,7 +31,42 @@ class FrameSource(Protocol):
 
 
 class FrameSaver(Protocol):
-    def save(self, frame, indices, setpoints, rbvs, timestamps) -> str: ...
+    def save(self, frame, indices, setpoints, rbvs, timestamps,
+             beam=None, decoded=None) -> str: ...
+
+
+# TimInjReq is a 7-element injection-request waveform (ALS dual-EVG timing
+# system). Index map (0-based here; the MML help is 1-based):
+#   0 target bucket (1-328)   1 gun bunches (1-16)   2 injection mode
+#   3 gun inhibit (0 fires/1 disabled)   4,5 field-sync delays   6 sequence number
+def _decode_timinjreq(value):
+    """Decode a TimInjReq waveform into named fields, or {} if not decodable."""
+    if value is None:
+        return {}
+    try:
+        seq = list(value)
+    except TypeError:
+        return {}
+    if len(seq) < 7:
+        return {}
+    return {"target_bucket": seq[0], "gun_bunches": seq[1], "inj_mode": seq[2],
+            "gun_inhibit": seq[3], "inj_seq": seq[6]}
+
+
+def _snapshot_beam(io, pvs):
+    """Best-effort {pv: {value, timestamp}} snapshot; never raises."""
+    out = {}
+    for pv in pvs:
+        try:
+            val = io.get_raw(pv)
+        except Exception:
+            val = None
+        try:
+            ts = io.get_timestamp(pv)
+        except Exception:
+            ts = None
+        out[pv] = {"value": val, "timestamp": ts}
+    return out
 
 
 class ScanError(Exception): ...
@@ -79,7 +115,9 @@ def _restore(io, cfg, pre):
 
 def _write_manifest(run_dir, rows):
     cols = ["i", "j", "k", "q1_setpoint", "q2_setpoint", "q1_rbv", "q2_rbv",
-            "q1_ioc_timestamp", "q2_ioc_timestamp", "wall_timestamp", "filename", "status"]
+            "q1_ioc_timestamp", "q2_ioc_timestamp",
+            "target_bucket", "gun_bunches", "inj_mode", "gun_inhibit", "inj_seq",
+            "wall_timestamp", "filename", "status", "beam_meta"]
     path = Path(run_dir) / "manifest.csv"
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -133,11 +171,20 @@ def run_scan(cfg: ScanConfig, io, frames, saver, run_dir,
                        "q2": io.get_timestamp(cfg.q2.rbv_pv)}
                 setpoints = {"q1": q1, "q2": q2}
                 ts = {"wall": time.time(), "q1_ioc": ioc["q1"], "q2_ioc": ioc["q2"]}
-                fname = saver.save(frame, (i, j, k), setpoints, rbvs, ts)
+                beam = _snapshot_beam(io, cfg.beam_meta_pvs)
+                decoded = _decode_timinjreq(beam.get("TimInjReq", {}).get("value"))
+                fname = saver.save(frame, (i, j, k), setpoints, rbvs, ts,
+                                   beam=beam, decoded=decoded)
                 rows.append({"i": i, "j": j, "k": k, "q1_setpoint": q1,
                              "q2_setpoint": q2, "q1_rbv": rbvs["q1"], "q2_rbv": rbvs["q2"],
                              "q1_ioc_timestamp": ioc["q1"], "q2_ioc_timestamp": ioc["q2"],
-                             "wall_timestamp": ts["wall"], "filename": fname, "status": "ok"})
+                             "target_bucket": decoded.get("target_bucket"),
+                             "gun_bunches": decoded.get("gun_bunches"),
+                             "inj_mode": decoded.get("inj_mode"),
+                             "gun_inhibit": decoded.get("gun_inhibit"),
+                             "inj_seq": decoded.get("inj_seq"),
+                             "wall_timestamp": ts["wall"], "filename": fname,
+                             "status": "ok", "beam_meta": json.dumps(beam)})
             if progress_cb is not None:
                 progress_cb(i, j)
     except ScanAborted as e:
