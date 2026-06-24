@@ -15,11 +15,12 @@ import queue
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 from scan_config import load_scan_config, validate_config, generate_grid
-from scan_engine import run_scan
+from scan_engine import run_scan, ScanAborted
 from scan_io import MonitorWriterIO, ScanFrameSaver
 from epics_control import PVWriter
 from pv_monitor import PVMonitor, load_pv_config
@@ -28,9 +29,10 @@ from pv_monitor import PVMonitor, load_pv_config
 class _CameraFrameSource:
     """FrameSource backed by a vmbpy hardware-triggered stream. Each completed
     frame is pushed to a queue; next_triggered_frame pops the next one."""
-    def __init__(self, cam):
+    def __init__(self, cam, abort_event=None):
         self._cam = cam
         self._q = queue.Queue(maxsize=4)
+        self._abort = abort_event
 
     def _handler(self, cam, stream, frame):
         import vmbpy
@@ -42,11 +44,19 @@ class _CameraFrameSource:
         cam.queue_frame(frame)
 
     def start(self):
+        import vmbpy
         cam = self._cam
         cam.TriggerSelector.set("FrameStart")
         cam.TriggerMode.set("On")
         cam.TriggerSource.set("Line1")
         cam.TriggerActivation.set("RisingEdge")
+        # 12-bit for quantitative profiles (full 0–4095 range); comes back as
+        # uint16 and is saved as a 16-bit TIFF. Match the GUI; fall back to the
+        # camera default if Mono12 is rejected.
+        try:
+            cam.set_pixel_format(vmbpy.PixelFormat.Mono12)
+        except Exception as exc:
+            print(f"  warning: could not set Mono12 (using default): {exc}")
         cam.start_streaming(self._handler)
 
     def stop(self):
@@ -66,10 +76,19 @@ class _CameraFrameSource:
                 self._q.get_nowait()
             except queue.Empty:
                 break
-        try:
-            return self._q.get(timeout=timeout)
-        except queue.Empty as e:
-            raise TimeoutError(f"no triggered frame within {timeout}s") from e
+        # Poll in short slices so a Ctrl-C (which sets the abort event) takes
+        # effect promptly instead of only after the full trigger timeout.
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._abort is not None and self._abort.is_set():
+                raise ScanAborted("aborted by user")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"no triggered frame within {timeout}s")
+            try:
+                return self._q.get(timeout=min(remaining, 0.2))
+            except queue.Empty:
+                continue
 
 
 def _make_epics_io(cfg, pv_config_path):
@@ -121,7 +140,7 @@ def main(argv=None):
         with vmbpy.VmbSystem.get_instance() as vmb:
             cam = vmb.get_all_cameras()[0]
             with cam:
-                src = _CameraFrameSource(cam)
+                src = _CameraFrameSource(cam, abort_event=abort)
                 src.start()
                 try:
                     saver = ScanFrameSaver(str(run_dir))

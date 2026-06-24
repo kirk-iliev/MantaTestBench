@@ -20,7 +20,7 @@ import vmbpy
 
 from pv_monitor import PVMonitor, load_pv_config
 from scan_config import AxisConfig, ScanConfig, validate_config, load_scan_config
-from scan_engine import run_scan, failed_result
+from scan_engine import run_scan, failed_result, ScanAborted
 from scan_io import MonitorWriterIO, ScanFrameSaver
 from epics_control import PVWriter
 
@@ -342,10 +342,11 @@ class _SignalFrameSource:
     from the scan runner thread to block until a frame arrives (or timeout).
     """
 
-    def __init__(self):
+    def __init__(self, abort_event=None):
         self._lock  = threading.Lock()
         self._cond  = threading.Condition(self._lock)
         self._frame = None
+        self._abort = abort_event
 
     def on_frame(self, frame: np.ndarray):
         """Slot — connect to CameraWorker.frame_ready."""
@@ -354,12 +355,21 @@ class _SignalFrameSource:
             self._cond.notify_all()
 
     def next_triggered_frame(self, timeout: float) -> np.ndarray:
-        """Block until a new frame arrives, then return it. Raises TimeoutError."""
+        """Block until a new frame arrives, then return it. Polls the abort event
+        in short slices so a Stop during the wait takes effect promptly rather
+        than only after ``timeout``. Raises ScanAborted / TimeoutError."""
+        deadline = time.monotonic() + timeout
         with self._cond:
             self._frame = None          # discard any stale frame
-            if not self._cond.wait_for(lambda: self._frame is not None, timeout=timeout):
-                raise TimeoutError(f"no triggered frame within {timeout}s")
-            return self._frame
+            while True:
+                if self._abort is not None and self._abort.is_set():
+                    raise ScanAborted("aborted by user")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"no triggered frame within {timeout}s")
+                if self._cond.wait_for(lambda: self._frame is not None,
+                                       timeout=min(remaining, 0.2)):
+                    return self._frame
 
 
 class _ScanRunner(QThread):
@@ -432,8 +442,12 @@ class MainWindow(QMainWindow):
                 return None
             mon = PVMonitor(pv_map, tunnel_cfg=tunnel_cfg)
             mon.start()
-            mode = (f"tunnel {tunnel_cfg['host']}:{tunnel_cfg['port']}"
-                    if tunnel_cfg else "native")
+            # tunnel_cfg is a list of {host,port} forwards (or None for native).
+            if tunnel_cfg:
+                mode = "tunnel " + ", ".join(
+                    f"{f['host']}:{f['port']}" for f in tunnel_cfg)
+            else:
+                mode = "native"
             print(f"EPICS metadata: monitoring {mon.total_count()} PV(s) "
                   f"from {cfg_path.name} ({mode} mode)")
             return mon
@@ -466,7 +480,7 @@ class MainWindow(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(285)
+        panel.setFixedWidth(340)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -488,7 +502,7 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setFixedWidth(285 + 18)   # panel width + room for the scrollbar
+        scroll.setFixedWidth(340 + 18)   # panel width + room for the scrollbar
         return scroll
 
     def _build_stats_group(self) -> QGroupBox:
@@ -645,9 +659,16 @@ class MainWindow(QMainWindow):
             return w
 
         def _ledit(text):
-            return QLineEdit(text)
+            w = QLineEdit(text)
+            w.setMinimumWidth(200)      # fit full PV names without squeezing
+            return w
 
         form = QFormLayout()
+        # Stack long fields (PV names) under their label so they get the panel's
+        # full width instead of sharing a narrow row; numeric rows stay inline.
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         layout.addLayout(form)
 
         # ── Q1 axis ──────────────────────────────────────────────────────
@@ -713,9 +734,15 @@ class MainWindow(QMainWindow):
         self._scan_settle = _dbl(sc.settle_timeout_s  if sc else 10.0, lo=0.1, hi=3600.0, step=1.0, dec=1)
         self._scan_trig   = _dbl(sc.trigger_timeout_s if sc else 30.0, lo=0.1, hi=3600.0, step=1.0, dec=1)
 
+        # Comma-separated beam-metadata PVs snapshotted (best-effort) per frame
+        # for provenance, e.g. "TimInjReq, EG______BIAS___AM01". A "TimInjReq"
+        # waveform is also decoded into named columns. Empty = none recorded.
+        self._scan_beam_pvs = _ledit(", ".join(sc.beam_meta_pvs) if sc else "")
+
         form.addRow("Frames/pt:",   self._scan_fpp)
         form.addRow("Settle tmo s:", self._scan_settle)
         form.addRow("Trig tmo s:",   self._scan_trig)
+        form.addRow("Beam meta PVs:", self._scan_beam_pvs)
 
         # ── Run / Stop ────────────────────────────────────────────────────
         self._scan_run_btn  = QPushButton("Run Scan")
@@ -760,6 +787,8 @@ class MainWindow(QMainWindow):
             trigger_timeout_s=self._scan_trig.value(),
             restore_on_finish=True,
             output_dir=str(self._save_dir),
+            beam_meta_pvs=[p.strip() for p in self._scan_beam_pvs.text().split(",")
+                           if p.strip()],
         )
 
     def _start_scan(self):
@@ -800,7 +829,8 @@ class MainWindow(QMainWindow):
 
         self._scan_monitor = scan_monitor
         self._scan_io      = io
-        self._scan_src     = _SignalFrameSource()
+        self._scan_abort   = threading.Event()
+        self._scan_src     = _SignalFrameSource(self._scan_abort)
         # _SignalFrameSource is a plain object (not a QObject), so this is a
         # direct connection: on_frame runs on the thread that emits frame_ready
         # (vmbpy's callback thread), while next_triggered_frame blocks on the
@@ -808,7 +838,6 @@ class MainWindow(QMainWindow):
         # If _SignalFrameSource ever becomes a QObject this flips to a queued
         # connection and the scan thread would block forever; keep it a plain object.
         self._worker.frame_ready.connect(self._scan_src.on_frame)
-        self._scan_abort   = threading.Event()
 
         self._scan_runner = _ScanRunner(
             cfg, io, self._scan_src, str(run_dir), self._scan_abort,

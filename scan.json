@@ -1,0 +1,48 @@
+{
+  "_README": [
+    "Pre-fills the GUI 2D-Scan panel. Q1 axis -> LTB:Q1_1, Q2 axis -> LTB:Q1_2.",
+    "Keys starting with _ are comments and are ignored by the loader.",
+    "",
+    "PV names below are CONFIRMED from the ALS MML (buildmmlcaen_als.m, Caen SY3634):",
+    "  setpoint = <base>:Setpoint   (ao record, commanded current)",
+    "  readback = <base>:CurrentRBV (ai record, ACTUAL measured current)",
+    "Values are in HARDWARE units = AMPS. MML full-scale Setpoint.Range = +/-10 A,",
+    "default Setpoint.Tolerance = 0.1 A. These supplies ramp internally (see",
+    "<base>:Ramping / <base>:SlewRate), so a single absolute write slews there.",
+    "",
+    "STILL TODO before running: set the real scan range (min/max/points) and the",
+    "HARD safe band (limit_min/limit_max) for THIS study. limit_min/limit_max =",
+    "the band outside which every write is refused; min/max/points = the sweep,",
+    "and must sit inside it: limit_min <= min <= max <= limit_max.",
+    "The +/-10 limits below are the MML full-scale as a STARTING point -- narrow",
+    "them to the safe band you actually want for the measurement."
+  ],
+  "axes": {
+    "Q1": {
+      "setpoint_pv": "LTB:Q1_1:Setpoint",
+      "rbv_pv": "LTB:Q1_1:CurrentRBV",
+      "min": 0.0,
+      "max": 0.0,
+      "points": 1,
+      "limit_min": -10.0,
+      "limit_max": 10.0,
+      "settle_tol": 0.1
+    },
+    "Q2": {
+      "setpoint_pv": "LTB:Q1_2:Setpoint",
+      "rbv_pv": "LTB:Q1_2:CurrentRBV",
+      "min": 0.0,
+      "max": 0.0,
+      "points": 1,
+      "limit_min": -10.0,
+      "limit_max": 10.0,
+      "settle_tol": 0.1
+    }
+  },
+  "settle": { "timeout_s": 10.0, "poll_s": 0.1 },
+  "frames_per_point": 1,
+  "trigger_timeout_s": 30.0,
+  "restore_on_finish": true,
+  "output_dir": "scans",
+  "beam_meta_pvs": []
+}
