@@ -467,6 +467,12 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_live_view(), stretch=4)
         root.addWidget(self._build_right_panel())
 
+        # Frame counters pinned to the right of the status bar (permanent
+        # widgets, so they aren't clobbered by showMessage() status text).
+        self._lbl_acquired = QLabel("Acquired: 0")
+        self._lbl_dropped  = QLabel("Dropped: 0")
+        self.statusBar().addPermanentWidget(self._lbl_acquired)
+        self.statusBar().addPermanentWidget(self._lbl_dropped)
         self.statusBar().showMessage("Starting camera…")
 
     def _build_live_view(self) -> QLabel:
@@ -485,7 +491,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        layout.addWidget(self._build_stats_group())
         layout.addWidget(self._build_camera_settings_group())
         layout.addWidget(self._build_save_group())
         layout.addWidget(self._build_scan_group())
@@ -504,25 +509,6 @@ class MainWindow(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFixedWidth(340 + 18)   # panel width + room for the scrollbar
         return scroll
-
-    def _build_stats_group(self) -> QGroupBox:
-        group = QGroupBox("Stats")
-        form  = QFormLayout(group)
-
-        self._lbl_sys_fps  = QLabel("—")
-        self._lbl_cam_fps  = QLabel("—")
-        self._lbl_max_fps  = QLabel("—")
-        self._lbl_total    = QLabel("0")
-        self._lbl_dropped  = QLabel("0")
-        self._lbl_saved    = QLabel("0")
-
-        form.addRow("System FPS:",   self._lbl_sys_fps)
-        form.addRow("Camera FPS:",   self._lbl_cam_fps)
-        form.addRow("Max Possible:", self._lbl_max_fps)
-        form.addRow("Total Frames:", self._lbl_total)
-        form.addRow("Dropped:",      self._lbl_dropped)
-        form.addRow("Shots Saved:",  self._lbl_saved)
-        return group
 
     def _build_camera_settings_group(self) -> QGroupBox:
         group = QGroupBox("Camera Settings")
@@ -896,7 +882,6 @@ class MainWindow(QMainWindow):
     def _on_camera_initialized(self, init: dict):
         self._exp_spin.setValue(init.get("exposure_us", 5000.0))
         self._gain_spin.setValue(init.get("gain_db", 0.0))
-        self._lbl_max_fps.setText(f"{init.get('max_fps', 0.0):.2f}")
         self.statusBar().showMessage("Hardware trigger mode — waiting for Line1 signal.")
 
     def _on_frame_ready(self, frame: np.ndarray):
@@ -931,15 +916,10 @@ class MainWindow(QMainWindow):
         self._view_label.setPixmap(QPixmap.fromImage(qimg))
 
     def _on_stats_updated(self, stats: dict):
-        self._lbl_sys_fps.setText(f"{stats['system_fps']:.2f}")
-        self._lbl_cam_fps.setText(f"{stats['camera_fps']:.2f}")
-        self._lbl_max_fps.setText(f"{stats['max_fps']:.2f}")
-        self._lbl_total.setText(str(stats['total']))
+        self._lbl_acquired.setText(f"Acquired: {stats['total']}")
         dropped = stats['dropped']
-        self._lbl_dropped.setText(str(dropped))
-        color = "color: #e55;" if dropped > 0 else ""
-        self._lbl_dropped.setStyleSheet(color)
-        self._lbl_saved.setText(str(stats['saved']))
+        self._lbl_dropped.setText(f"Dropped: {dropped}")
+        self._lbl_dropped.setStyleSheet("color: #e55;" if dropped > 0 else "")
 
     def _on_error(self, msg: str):
         self.statusBar().showMessage(f"Error: {msg}")
