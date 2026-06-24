@@ -1,8 +1,9 @@
 /.venv
 __pycache__/
+.DS_Store
 PROJECT_OVERVIEW.md
 test_discovery.py
 hw_trigger_test.py
 
-# Personal/live PV config — commit pv_config.example.json instead
-pv_config.json
+# pv_config.json is tracked (committed for the quad-scan study); see also
+# pv_config.example.json for the documented template.

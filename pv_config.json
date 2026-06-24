@@ -1,0 +1,8 @@
+{
+  "_epics": { "forwards": [ {"host": "localhost", "port": 15064} ] },
+
+  "q1_1_setpoint_a": "LTB:Q1_1:Setpoint",
+  "q1_2_setpoint_a": "LTB:Q1_2:Setpoint",
+  "q1_1_currentrbv_a": "LTB:Q1_1:CurrentRBV",
+  "q1_2_currentrbv_a": "LTB:Q1_2:CurrentRBV"
+}

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Automated 2D Quadrupole Scan — System Overview</title>
+<style>
+  @page { size: Letter; margin: 0.5in; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #1c2733; font-size: 10.2px; line-height: 1.4;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  h1 { font-size: 18px; margin: 0 0 2px; color: #14304d; letter-spacing: .2px; }
+  .sub { font-size: 10.5px; color: #5a6b7b; margin: 0 0 8px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .7px;
+       color: #14304d; margin: 0 0 5px; border-bottom: 1.5px solid #d4dde6; padding-bottom: 3px; }
+  p { margin: 0 0 6px; }
+  .lead { margin: 0 0 10px; }
+  .cols { display: flex; gap: 16px; }
+  .col { flex: 1; }
+  ul { margin: 0 0 6px; padding-left: 15px; }
+  li { margin-bottom: 3px; }
+  .tag { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9px;
+         background: #eef3f8; color: #2b4763; padding: 0.5px 4px; border-radius: 3px; }
+  .card { border: 1px solid #dbe3ec; border-radius: 6px; padding: 8px 10px; margin-bottom: 9px; background:#fafcfe; }
+  .card h2 { border: none; margin-bottom: 4px; padding-bottom: 0; }
+  .note { font-size: 9.3px; color: #5a6b7b; font-style: italic; }
+  .foot { margin-top: 8px; padding-top: 6px; border-top: 1.5px solid #d4dde6;
+          font-size: 9.3px; color: #5a6b7b; }
+  .flowwrap { margin: 4px 0 12px; }
+  svg { display: block; }
+  .k { font-weight: 600; color:#14304d; }
+</style>
+</head>
+<body>
+
+  <h1>Automated 2D Quadrupole Scan</h1>
+  <p class="sub">Beam-spot imaging system &nbsp;·&nbsp; quadrupole-scan data acquisition for emittance measurement</p>
+
+  <p class="lead">
+    The system records a beam-spot image on the YAG screen at each point of a two-dimensional
+    grid of quadrupole settings. Two quadrupoles (<span class="k">Q1</span>, <span class="k">Q2</span>)
+    are stepped across a configured range; at every setting the magnets are allowed to settle and the
+    next beam shot is captured. The result is a complete, labeled image set — one frame per (Q1, Q2)
+    pair — together with the magnet readbacks and beam parameters recorded at the moment of each shot,
+    which is the raw material a quadrupole-scan emittance analysis consumes.
+  </p>
+
+  <!-- ============ MAIN FLOW ============ -->
+  <h2>How a scan runs</h2>
+  <div class="flowwrap">
+  <svg width="720" height="226" viewBox="0 0 720 226" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+    <defs>
+      <marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#43607d"/>
+      </marker>
+      <marker id="ahr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 z" fill="#b5651d"/>
+      </marker>
+    </defs>
+
+    <!-- pre-flight -->
+    <rect x="0" y="44" width="120" height="58" rx="7" fill="#e8eef5" stroke="#9cb2c9"/>
+    <text x="60" y="63" text-anchor="middle" font-size="11" font-weight="700" fill="#14304d">Configure</text>
+    <text x="60" y="77" text-anchor="middle" font-size="8.5" fill="#3c526a">&amp; pre-flight</text>
+    <text x="60" y="90" text-anchor="middle" font-size="7.6" fill="#5a6b7b">validate · check PVs ·</text>
+    <text x="60" y="99" text-anchor="middle" font-size="7.6" fill="#5a6b7b">save pre-scan values</text>
+
+    <line x1="120" y1="73" x2="150" y2="73" stroke="#43607d" stroke-width="1.6" marker-end="url(#ah)"/>
+
+    <!-- LOOP container -->
+    <rect x="152" y="20" width="436" height="118" rx="9" fill="none" stroke="#c2cedb" stroke-dasharray="4 3"/>
+    <text x="370" y="15" text-anchor="middle" font-size="8.5" fill="#5a6b7b" font-weight="600">FOR EACH GRID POINT (Q1 outer, Q2 inner)</text>
+
+    <!-- 4 stages -->
+    <g>
+      <rect x="160" y="44" width="96" height="58" rx="7" fill="#dcebf6" stroke="#9b6fc0"/>
+      <text x="208" y="61" text-anchor="middle" font-size="10.5" font-weight="700" fill="#3d1d63">1 · SET</text>
+      <text x="208" y="76" text-anchor="middle" font-size="7.8" fill="#43355a">write Q1, Q2</text>
+      <text x="208" y="87" text-anchor="middle" font-size="7.8" fill="#43355a">setpoints</text>
+      <text x="208" y="98" text-anchor="middle" font-size="7" fill="#7a6a90">(limit-checked)</text>
+    </g>
+    <line x1="256" y1="73" x2="270" y2="73" stroke="#43607d" stroke-width="1.6" marker-end="url(#ah)"/>
+    <g>
+      <rect x="271" y="44" width="96" height="58" rx="7" fill="#d3ebe4" stroke="#5aa991"/>
+      <text x="319" y="61" text-anchor="middle" font-size="10.5" font-weight="700" fill="#13503c">2 · SETTLE</text>
+      <text x="319" y="76" text-anchor="middle" font-size="7.8" fill="#274f43">poll readbacks</text>
+      <text x="319" y="87" text-anchor="middle" font-size="7.8" fill="#274f43">to tolerance</text>
+      <text x="319" y="98" text-anchor="middle" font-size="7" fill="#5d7a70">(bounded by timeout)</text>
+    </g>
+    <line x1="367" y1="73" x2="381" y2="73" stroke="#43607d" stroke-width="1.6" marker-end="url(#ah)"/>
+    <g>
+      <rect x="382" y="44" width="96" height="58" rx="7" fill="#fae6cc" stroke="#d09a52"/>
+      <text x="430" y="61" text-anchor="middle" font-size="10.5" font-weight="700" fill="#7a4a12">3 · ACQUIRE</text>
+      <text x="430" y="76" text-anchor="middle" font-size="7.8" fill="#5e4115">wait for next</text>
+      <text x="430" y="87" text-anchor="middle" font-size="7.8" fill="#5e4115">beam shot</text>
+      <text x="430" y="98" text-anchor="middle" font-size="7" fill="#8a6a3a">(camera trigger)</text>
+    </g>
+    <line x1="478" y1="73" x2="492" y2="73" stroke="#43607d" stroke-width="1.6" marker-end="url(#ah)"/>
+    <g>
+      <rect x="493" y="44" width="92" height="58" rx="7" fill="#dde6f3" stroke="#7d97bd"/>
+      <text x="539" y="61" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1c3a63">4 · RECORD</text>
+      <text x="539" y="76" text-anchor="middle" font-size="7.8" fill="#28456e">image + readbacks</text>
+      <text x="539" y="87" text-anchor="middle" font-size="7.8" fill="#28456e">+ beam metadata</text>
+    </g>
+
+    <!-- return arrow (next point) -->
+    <path d="M539,44 L539,30 L208,30 L208,44" fill="none" stroke="#43607d" stroke-width="1.5" marker-end="url(#ah)"/>
+    <text x="373" y="27" text-anchor="middle" font-size="7.8" fill="#43607d" font-weight="600">next grid point</text>
+
+    <!-- exit to restore -->
+    <line x1="588" y1="73" x2="612" y2="73" stroke="#43607d" stroke-width="1.6" marker-end="url(#ah)"/>
+    <rect x="613" y="44" width="104" height="58" rx="7" fill="#e8eef5" stroke="#9cb2c9"/>
+    <text x="665" y="63" text-anchor="middle" font-size="10.5" font-weight="700" fill="#14304d">Restore</text>
+    <text x="665" y="78" text-anchor="middle" font-size="7.8" fill="#3c526a">quads → pre-scan</text>
+    <text x="665" y="89" text-anchor="middle" font-size="7.8" fill="#3c526a">+ write manifest</text>
+
+    <!-- fault / abort path -->
+    <path d="M370,138 L370,176" fill="none" stroke="#b5651d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ahr)"/>
+    <path d="M370,176 L665,176 L665,102" fill="none" stroke="#b5651d" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ahr)"/>
+    <text x="378" y="160" text-anchor="start" font-size="8" fill="#b5651d" font-weight="600">any fault, or Stop / Ctrl-C</text>
+    <text x="378" y="171" text-anchor="start" font-size="7.6" fill="#a86a30">→ stop immediately (fail-fast), always restore</text>
+  </svg>
+  </div>
+
+  <!-- ============ LOWER TWO COLUMNS ============ -->
+  <div class="cols">
+    <div class="col">
+
+      <h2>Scan grid &amp; order</h2>
+      <svg width="340" height="120" viewBox="0 0 340 120" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+        <!-- axes -->
+        <line x1="34" y1="100" x2="200" y2="100" stroke="#9aa9b8" stroke-width="1"/>
+        <line x1="34" y1="100" x2="34" y2="14" stroke="#9aa9b8" stroke-width="1"/>
+        <text x="117" y="115" text-anchor="middle" font-size="8" fill="#5a6b7b">Q2  (inner axis, low → high)</text>
+        <text x="16" y="57" text-anchor="middle" font-size="8" fill="#5a6b7b" transform="rotate(-90 16 57)">Q1 (outer)</text>
+        <!-- raster snake path -->
+        <path d="M48,86 H186 M186,86 V64 M186,64 H48 M48,64 V42 M48,42 H186 M186,42 V20 M186,20 H48"
+              fill="none" stroke="#c9a23a" stroke-width="1.4" opacity="0.65"/>
+        <!-- dots 4x4 -->
+        <g fill="#2b4763">
+          <circle cx="48" cy="86" r="3.1"/><circle cx="94" cy="86" r="3.1"/><circle cx="140" cy="86" r="3.1"/><circle cx="186" cy="86" r="3.1"/>
+          <circle cx="48" cy="64" r="3.1"/><circle cx="94" cy="64" r="3.1"/><circle cx="140" cy="64" r="3.1"/><circle cx="186" cy="64" r="3.1"/>
+          <circle cx="48" cy="42" r="3.1"/><circle cx="94" cy="42" r="3.1"/><circle cx="140" cy="42" r="3.1"/><circle cx="186" cy="42" r="3.1"/>
+          <circle cx="48" cy="20" r="3.1"/><circle cx="94" cy="20" r="3.1"/><circle cx="140" cy="20" r="3.1"/><circle cx="186" cy="20" r="3.1"/>
+        </g>
+        <circle cx="48" cy="86" r="5" fill="none" stroke="#1b7a3e" stroke-width="1.6"/>
+        <text x="222" y="34" font-size="8" fill="#3c526a">● = one beam image</text>
+        <text x="222" y="49" font-size="8" fill="#3c526a">— = visit order (raster)</text>
+        <text x="222" y="64" font-size="8" fill="#1b7a3e">○ start</text>
+        <text x="222" y="83" font-size="7.6" fill="#5a6b7b">N × M points total</text>
+        <text x="222" y="94" font-size="7.6" fill="#5a6b7b">(e.g. 20×20 = 400)</text>
+      </svg>
+      <ul>
+        <li><span class="k">Raster, unidirectional:</span> Q1 holds while Q2 sweeps low→high, then Q2 resets and Q1 advances.</li>
+        <li>Each axis is set by <span class="k">min</span>, <span class="k">max</span>, and number of <span class="k">points</span>, inside a fixed hard-limit band.</li>
+        <li><span class="k">Frames per point</span> is configurable (default 1); multiple shots per setting are all kept as raw frames.</li>
+      </ul>
+
+      <h2>Beam delivery</h2>
+      <ul>
+        <li>The accelerator timing system and operator <span class="k">fire the beam</span>; the program does <span class="k">not</span> trigger the gun.</li>
+        <li>The camera is <span class="k">hardware-triggered</span> by the shot, so each captured frame is a real beam shot.</li>
+        <li>“Acquire” waits for the next shot <span class="k">after</span> the magnets settle; shots arriving mid-move are discarded. Shot cadence ≈ 1.3 s.</li>
+      </ul>
+
+    </div>
+    <div class="col">
+
+      <div class="card">
+        <h2>What gets recorded</h2>
+        <p style="margin-bottom:4px">One run folder per scan, containing for every frame:</p>
+        <ul style="margin-bottom:4px">
+          <li><span class="k">Raw image</span> — 16-bit TIFF of the beam spot.</li>
+          <li><span class="k">Sidecar file</span> — Q1/Q2 setpoints &amp; readbacks, timestamps, beam parameters.</li>
+          <li><span class="k">manifest.csv</span> — one row per frame (the full index of the run).</li>
+          <li><span class="k">scan_config.json</span> — exact parameters the run used.</li>
+        </ul>
+        <p class="note">Beam parameters logged per shot: target bucket, gun bunches, injection mode, gun-inhibit state, sequence number (from the injection request) and gun-bias readback — so each image is traceable to the beam that made it.</p>
+      </div>
+
+      <div class="card">
+        <h2>Safety &amp; integrity</h2>
+        <ul style="margin-bottom:0">
+          <li><span class="k">Limit-checked writes:</span> every magnet setpoint is refused if it falls outside that quad’s configured safe band — checked both before the scan and at every write.</li>
+          <li><span class="k">Pre-flight:</span> the scan refuses to start unless the whole grid is within limits and all required signals are connected.</li>
+          <li><span class="k">Fail-fast + restore:</span> any fault (a magnet not settling, no beam within the timeout, a lost signal) stops the scan at once and drives both quads back to their pre-scan values.</li>
+          <li><span class="k">Stop any time:</span> a manual stop follows the same safe restore path; partial data is preserved.</li>
+        </ul>
+      </div>
+
+      <div class="card" style="margin-bottom:0">
+        <h2>Scope</h2>
+        <p style="margin-bottom:0">The scan produces the labeled image set and metadata for a quad-scan measurement. <span class="k">Spot-size fitting and emittance computation are performed separately</span>, downstream from this acquisition.</p>
+      </div>
+
+    </div>
+  </div>
+
+  <p class="foot">
+    Acquisition runs from either a command-line driver or a “Scan” panel in the bench GUI; both share the same scan logic, safety checks, and output format.
+    Estimated duration ≈ (number of grid points) × (settle time + one beam cycle); e.g. a 20×20 grid is on the order of 10–20 minutes depending on magnet settling.
+  </p>
+
+</body>
+</html>
